@@ -1,0 +1,131 @@
+{
+  "description": "Known launch sites / spaceports for weak supervision labels",
+  "sites": [
+    {
+      "name": "Kennedy Space Center LC-39A",
+      "lat": 28.6083,
+      "lon": -80.6041,
+      "country": "US",
+      "buffer_km": 2.0
+    },
+    {
+      "name": "Cape Canaveral SLC-40",
+      "lat": 28.5622,
+      "lon": -80.5772,
+      "country": "US",
+      "buffer_km": 1.5
+    },
+    {
+      "name": "Vandenberg SLC-4E",
+      "lat": 34.6321,
+      "lon": -120.6109,
+      "country": "US",
+      "buffer_km": 1.5
+    },
+    {
+      "name": "Baikonur Cosmodrome",
+      "lat": 45.9650,
+      "lon": 63.3050,
+      "country": "KZ",
+      "buffer_km": 5.0
+    },
+    {
+      "name": "Plesetsk Cosmodrome",
+      "lat": 62.9271,
+      "lon": 40.5777,
+      "country": "RU",
+      "buffer_km": 3.0
+    },
+    {
+      "name": "Jiuquan Satellite Launch Center",
+      "lat": 40.9606,
+      "lon": 100.2914,
+      "country": "CN",
+      "buffer_km": 3.0
+    },
+    {
+      "name": "Xichang Satellite Launch Center",
+      "lat": 28.2463,
+      "lon": 102.0268,
+      "country": "CN",
+      "buffer_km": 2.0
+    },
+    {
+      "name": "Satish Dhawan Space Centre",
+      "lat": 13.7199,
+      "lon": 80.2304,
+      "country": "IN",
+      "buffer_km": 2.0
+    },
+    {
+      "name": "Tanegashima Space Center",
+      "lat": 30.4009,
+      "lon": 131.0089,
+      "country": "JP",
+      "buffer_km": 1.5
+    },
+    {
+      "name": "Guiana Space Centre",
+      "lat": 5.2322,
+      "lon": -52.7693,
+      "country": "FR/EU",
+      "buffer_km": 3.0
+    },
+    {
+      "name": "Vostochny Cosmodrome",
+      "lat": 51.8844,
+      "lon": 128.3340,
+      "country": "RU",
+      "buffer_km": 3.0
+    },
+    {
+      "name": "Wenchang Space Launch Site",
+      "lat": 19.6145,
+      "lon": 110.9510,
+      "country": "CN",
+      "buffer_km": 2.0
+    },
+    {
+      "name": "Semnan Space Center",
+      "lat": 35.2345,
+      "lon": 53.9211,
+      "country": "IR",
+      "buffer_km": 2.0
+    },
+    {
+      "name": "Sohae Satellite Launching Station",
+      "lat": 39.6602,
+      "lon": 124.7053,
+      "country": "KP",
+      "buffer_km": 1.5
+    },
+    {
+      "name": "Palmachim Airbase",
+      "lat": 31.8975,
+      "lon": 34.6909,
+      "country": "IL",
+      "buffer_km": 1.5
+    },
+    {
+      "name": "Rocket Lab Launch Complex 1",
+      "lat": -39.2615,
+      "lon": 177.8649,
+      "country": "NZ",
+      "buffer_km": 1.0
+    },
+    {
+      "name": "SpaceX Starbase Boca Chica",
+      "lat": 25.9972,
+      "lon": -97.1569,
+      "country": "US",
+      "buffer_km": 2.0
+    },
+    {
+      "name": "Esrange Space Center",
+      "lat": 67.8933,
+      "lon": 21.1064,
+      "country": "SE",
+      "buffer_km": 1.5
+    }
+  ]
+}

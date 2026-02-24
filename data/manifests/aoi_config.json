@@ -1,0 +1,35 @@
+{
+  "description": "Areas of interest for scanning",
+  "default_params": {
+    "tile_size_px": 256,
+    "gsd_m": 10,
+    "composite_days": 90,
+    "overlap_px": 32
+  },
+  "aois": [
+    {
+      "name": "florida_coast",
+      "description": "Cape Canaveral / KSC region",
+      "bbox": [-81.0, 28.0, -80.0, 29.0],
+      "priority": 1
+    },
+    {
+      "name": "vandenberg",
+      "description": "Vandenberg SFB region",
+      "bbox": [-121.0, 34.3, -120.2, 35.0],
+      "priority": 1
+    },
+    {
+      "name": "baikonur",
+      "description": "Baikonur Cosmodrome region",
+      "bbox": [62.5, 45.5, 64.0, 46.5],
+      "priority": 2
+    },
+    {
+      "name": "south_texas",
+      "description": "SpaceX Starbase / Boca Chica",
+      "bbox": [-97.5, 25.7, -96.8, 26.3],
+      "priority": 2
+    }
+  ]
+}

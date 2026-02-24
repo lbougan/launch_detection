@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Launch Site Detection</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/maplibre-gl@4.1.0/dist/maplibre-gl.css"
+    />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header id="header">
+        <h1>Launch Site Detection</h1>
+        <div id="controls">
+          <label>
+            Min score
+            <input
+              type="range"
+              id="score-slider"
+              min="0"
+              max="100"
+              value="30"
+            />
+            <span id="score-value">0.30</span>
+          </label>
+          <label>
+            <input type="checkbox" id="toggle-known" checked />
+            Known sites
+          </label>
+          <label>
+            <input type="checkbox" id="toggle-heatmap" />
+            Heatmap
+          </label>
+        </div>
+      </header>
+      <div id="map"></div>
+      <aside id="panel" class="hidden">
+        <button id="panel-close">&times;</button>
+        <div id="panel-content"></div>
+      </aside>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
