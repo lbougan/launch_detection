@@ -45,3 +45,4 @@ class HealthResponse(BaseModel):
     status: str
     version: str
     detection_count: int
+    triton_ready: bool | None = None

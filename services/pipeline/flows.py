@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 
 from prefect import flow
@@ -15,6 +16,7 @@ from services.pipeline.tasks import (
     ingest_aoi_task,
     postprocess_task,
     run_inference_task,
+    run_triton_inference_task,
     store_detections_task,
     tile_composite_task,
     train_model_task,
@@ -128,11 +130,23 @@ def scan_and_detect_flow(
     model_version: str = "v0.1",
     threshold: float = 0.5,
     device: str = "cpu",
+    serving_mode: str = "",
+    triton_url: str = "",
 ) -> int:
-    """Flow 2: Run inference over AOI composites, postprocess, and store detections.
+    """Run inference over AOI composites, postprocess, and store detections.
 
-    Returns the total number of stored detections.
+    Args:
+        serving_mode: ``"local"`` for in-process PyTorch, ``"triton"`` for
+            Triton Inference Server. Defaults to ``"triton"`` when the
+            ``TRITON_URL`` env var is set, otherwise ``"local"``.
+        triton_url: Triton gRPC endpoint (overrides ``TRITON_URL`` env var).
+
+    Returns:
+        Total number of stored detections.
     """
+    if not serving_mode:
+        serving_mode = "triton" if os.environ.get("TRITON_URL") else "local"
+
     with open(aoi_config_path) as f:
         aoi_config = json.load(f)
 
@@ -149,12 +163,19 @@ def scan_and_detect_flow(
 
         prob_path = str(data_dir / "predictions" / f"{aoi_name}_prob.tif")
 
-        run_inference_task(
-            checkpoint_path=checkpoint_path,
-            raster_path=str(composite_path),
-            output_path=prob_path,
-            device=device,
-        )
+        if serving_mode == "triton":
+            run_triton_inference_task(
+                raster_path=str(composite_path),
+                output_path=prob_path,
+                triton_url=triton_url,
+            )
+        else:
+            run_inference_task(
+                checkpoint_path=checkpoint_path,
+                raster_path=str(composite_path),
+                output_path=prob_path,
+                device=device,
+            )
 
         geojson = postprocess_task(
             prob_raster_path=prob_path,
@@ -248,6 +269,12 @@ if __name__ == "__main__":
     p_detect.add_argument("--aoi-config", default="data/manifests/aoi_config.json")
     p_detect.add_argument("--checkpoint", default="checkpoints/best.ckpt")
     p_detect.add_argument("--model-version", default="v0.1")
+    p_detect.add_argument(
+        "--serving-mode", default="", choices=["", "local", "triton"],
+        help="Inference backend: 'local' (in-process PyTorch) or 'triton' (Triton server). "
+             "Default: auto-detect via TRITON_URL env var.",
+    )
+    p_detect.add_argument("--triton-url", default="", help="Triton gRPC endpoint")
 
     args = parser.parse_args()
 
@@ -283,4 +310,6 @@ if __name__ == "__main__":
             aoi_config_path=args.aoi_config,
             checkpoint_path=args.checkpoint,
             model_version=args.model_version,
+            serving_mode=args.serving_mode,
+            triton_url=args.triton_url,
         )

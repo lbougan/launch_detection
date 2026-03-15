@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 
 import numpy as np
@@ -30,6 +31,8 @@ from libs.stac.client import ingest_aoi
 from services.training.dataset import LaunchSiteDataset
 from services.training.inference import load_model, sliding_window_inference
 from services.training.lightning_module import LaunchSiteSegModule
+
+TRITON_URL = os.environ.get("TRITON_URL", "")
 
 logger = logging.getLogger(__name__)
 
@@ -211,6 +214,48 @@ def run_inference_task(
         overlap=overlap,
         device=device,
     )
+    return str(result)
+
+
+@task(name="run-triton-inference")
+def run_triton_inference_task(
+    raster_path: str,
+    output_path: str,
+    triton_url: str = "",
+    tile_size: int = 256,
+    overlap: int = 64,
+    batch_size: int = 16,
+    use_memopt: bool = False,
+    max_memory_mb: float = 512.0,
+) -> str:
+    """Run sliding-window inference via Triton Inference Server."""
+    from services.serving.triton_client import triton_sliding_window_inference
+
+    url = triton_url or TRITON_URL
+    if not url:
+        raise ValueError("Triton URL not set: pass triton_url or set TRITON_URL env var")
+
+    if use_memopt:
+        from services.serving.memory_optimized import memory_optimized_inference
+
+        result = memory_optimized_inference(
+            raster_path=Path(raster_path),
+            output_path=Path(output_path),
+            triton_url=url,
+            tile_size=tile_size,
+            overlap=overlap,
+            batch_size=batch_size,
+            max_memory_mb=max_memory_mb,
+        )
+    else:
+        result = triton_sliding_window_inference(
+            raster_path=Path(raster_path),
+            output_path=Path(output_path),
+            triton_url=url,
+            tile_size=tile_size,
+            overlap=overlap,
+            batch_size=batch_size,
+        )
     return str(result)
 
 

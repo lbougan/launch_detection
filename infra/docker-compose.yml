@@ -47,6 +47,27 @@ services:
       postgres:
         condition: service_healthy
 
+  triton:
+    image: nvcr.io/nvidia/tritonserver:24.01-py3
+    command: tritonserver --model-repository=/models --log-verbose=1
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+      - "8002:8002"
+    volumes:
+      - ../model_repository:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v2/health/ready"]
+      interval: 10s
+      retries: 5
+
 volumes:
   pgdata:
   minio_data:

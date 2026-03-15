@@ -25,6 +25,12 @@ mlflow>=2.10.0
 # Orchestration
 prefect>=2.14.0
 
+# Model serving (Triton)
+tritonclient[grpc]>=2.42.0
+onnx>=1.15.0
+onnxruntime>=1.17.0
+pynvml>=11.5.0
+
 # API / serving
 fastapi>=0.110.0
 uvicorn[standard]>=0.27.0
