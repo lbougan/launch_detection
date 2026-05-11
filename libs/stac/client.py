@@ -15,9 +15,7 @@ import numpy as np
 import rasterio
 from pyproj import Transformer
 from rasterio.windows import from_bounds
-from shapely.geometry import box, mapping
 
-from libs.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -141,9 +139,7 @@ def _bbox_to_native(
     return west, south, east, north
 
 
-def _read_band(
-    url: str, target_bbox: list[float], out_shape: tuple[int, int]
-) -> np.ndarray:
+def _read_band(url: str, target_bbox: list[float], out_shape: tuple[int, int]) -> np.ndarray:
     """Read a single band crop from a remote COG, computing its own window."""
     with rasterio.open(url) as src:
         west, south, east, north = _bbox_to_native(target_bbox, src.crs)
@@ -250,7 +246,11 @@ def _download_one_scene(
         sz = path.stat().st_size / 1e6
         logger.info(
             "  [%d/%d] %s  %.1f MB  %.1fs",
-            idx, total, scene.scene_id, sz, time.time() - t0,
+            idx,
+            total,
+            scene.scene_id,
+            sz,
+            time.time() - t0,
         )
         return path
     except Exception as exc:
@@ -280,9 +280,7 @@ def ingest_aoi(
 
     with ThreadPoolExecutor(max_workers=max_scene_workers) as pool:
         futures = {
-            pool.submit(
-                _download_one_scene, scene, bbox, s2_dir, S2_BANDS, i, len(scenes)
-            ): scene
+            pool.submit(_download_one_scene, scene, bbox, s2_dir, S2_BANDS, i, len(scenes)): scene
             for i, scene in enumerate(scenes, 1)
         }
         for future in as_completed(futures):

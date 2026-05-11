@@ -6,7 +6,6 @@ import json
 import logging
 from pathlib import Path
 
-import geopandas as gpd
 import numpy as np
 import rasterio
 from rasterio.features import rasterize
@@ -63,15 +62,19 @@ def chip_raster(
                 with rasterio.open(out_path, "w", **profile) as dst:
                     dst.write(data)
 
-                chips.append({
-                    "tile_id": tile_id,
-                    "path": str(out_path),
-                    "bbox": list(bounds),
-                    "row_off": row_off,
-                    "col_off": col_off,
-                })
+                chips.append(
+                    {
+                        "tile_id": tile_id,
+                        "path": str(out_path),
+                        "bbox": list(bounds),
+                        "row_off": row_off,
+                        "col_off": col_off,
+                    }
+                )
 
-    logger.info("Chipped %s into %d tiles (%dpx, overlap=%d)", raster_path, len(chips), tile_size, overlap)
+    logger.info(
+        "Chipped %s into %d tiles (%dpx, overlap=%d)", raster_path, len(chips), tile_size, overlap
+    )
     return chips
 
 
@@ -162,7 +165,11 @@ def build_dataset_split(
         n = len(arr)
         n_train = int(n * train_frac)
         n_val = int(n * val_frac)
-        return arr[:n_train].tolist(), arr[n_train:n_train + n_val].tolist(), arr[n_train + n_val:].tolist()
+        return (
+            arr[:n_train].tolist(),
+            arr[n_train : n_train + n_val].tolist(),
+            arr[n_train + n_val :].tolist(),
+        )
 
     pos_train, pos_val, pos_test = _split_indices(positive_indices)
     neg_train, neg_val, neg_test = _split_indices(negative_indices)
@@ -183,6 +190,8 @@ def build_dataset_split(
         len(pos_train) + len(neg_train),
         len(pos_val) + len(neg_val),
         len(pos_test) + len(neg_test),
-        len(pos_train), len(pos_val), len(pos_test),
+        len(pos_train),
+        len(pos_val),
+        len(pos_test),
     )
     return chip_metas

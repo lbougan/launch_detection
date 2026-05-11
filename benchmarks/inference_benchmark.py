@@ -23,7 +23,6 @@ import time
 import tracemalloc
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import rasterio
@@ -87,9 +86,7 @@ def create_synthetic_raster(
 ) -> Path:
     """Create a synthetic multi-band GeoTIFF for benchmarking."""
     rng = np.random.default_rng(42)
-    data = rng.integers(0, 10000, size=(n_bands, height, width), dtype=np.uint16).astype(
-        np.float32
-    )
+    data = rng.integers(0, 10000, size=(n_bands, height, width), dtype=np.uint16).astype(np.float32)
 
     path = Path(tmpdir or tempfile.mkdtemp()) / f"synthetic_{height}x{width}.tif"
     transform = from_bounds(0, 0, width * 10, height * 10, width, height)
@@ -325,12 +322,8 @@ def main() -> None:
         help="Comma-separated list of modes",
     )
     parser.add_argument("--tile-size", type=int, default=256)
-    parser.add_argument(
-        "--batch-sizes", default="1,8,16,32", help="Comma-separated batch sizes"
-    )
-    parser.add_argument(
-        "--overlaps", default="0,32,64", help="Comma-separated overlap values"
-    )
+    parser.add_argument("--batch-sizes", default="1,8,16,32", help="Comma-separated batch sizes")
+    parser.add_argument("--overlaps", default="0,32,64", help="Comma-separated overlap values")
     parser.add_argument(
         "--raster-sizes",
         default="1024,4096,11000",
@@ -371,7 +364,6 @@ def main() -> None:
                     for mode in modes:
                         label = f"{mode}|size={size_key}|ov={ov}|bs={bs}"
                         logger.info("Running: %s", label)
-                        gpu_before = _gpu_utilization()
 
                         try:
                             if mode == "baseline":

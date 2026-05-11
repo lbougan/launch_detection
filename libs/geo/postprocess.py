@@ -45,7 +45,6 @@ def threshold_and_extract(
     with rasterio.open(prob_raster_path) as src:
         prob = src.read(1)
         transform = src.transform
-        crs = src.crs
         pixel_area_m2 = abs(transform.a * transform.e)
 
     binary = (prob >= threshold).astype(np.uint8)
@@ -79,15 +78,17 @@ def threshold_and_extract(
         compactness = _compactness(merged)
         centroid = merged.centroid
 
-        detections.append(Detection(
-            geometry=merged,
-            score=mean_prob,
-            area_km2=area_km2,
-            compactness=compactness,
-            centroid_lon=centroid.x,
-            centroid_lat=centroid.y,
-            evidence={"mean_prob": mean_prob, "area_px": int(area_px)},
-        ))
+        detections.append(
+            Detection(
+                geometry=merged,
+                score=mean_prob,
+                area_km2=area_km2,
+                compactness=compactness,
+                centroid_lon=centroid.x,
+                centroid_lat=centroid.y,
+                evidence={"mean_prob": mean_prob, "area_px": int(area_px)},
+            )
+        )
 
     detections.sort(key=lambda d: d.score, reverse=True)
     logger.info("Extracted %d candidate detections (min_area=%dpx)", len(detections), min_area_px)
@@ -98,7 +99,7 @@ def _compactness(polygon: Polygon) -> float:
     """Polsby-Popper compactness: 4*pi*area / perimeter^2. Circle = 1."""
     if polygon.length == 0:
         return 0.0
-    return (4 * np.pi * polygon.area) / (polygon.length ** 2)
+    return (4 * np.pi * polygon.area) / (polygon.length**2)
 
 
 def deduplicate_detections(
@@ -151,10 +152,7 @@ def _dedupe_iou(detections: list[Detection], iou_threshold: float) -> list[Detec
     while remaining:
         best = remaining.pop(0)
         kept.append(best)
-        remaining = [
-            d for d in remaining
-            if _iou(best.geometry, d.geometry) < iou_threshold
-        ]
+        remaining = [d for d in remaining if _iou(best.geometry, d.geometry) < iou_threshold]
 
     logger.info("IoU dedupe: %d → %d detections", len(detections), len(kept))
     return kept

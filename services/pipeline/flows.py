@@ -270,9 +270,11 @@ if __name__ == "__main__":
     p_detect.add_argument("--checkpoint", default="checkpoints/best.ckpt")
     p_detect.add_argument("--model-version", default="v0.1")
     p_detect.add_argument(
-        "--serving-mode", default="", choices=["", "local", "triton"],
+        "--serving-mode",
+        default="",
+        choices=["", "local", "triton"],
         help="Inference backend: 'local' (in-process PyTorch) or 'triton' (Triton server). "
-             "Default: auto-detect via TRITON_URL env var.",
+        "Default: auto-detect via TRITON_URL env var.",
     )
     p_detect.add_argument("--triton-url", default="", help="Triton gRPC endpoint")
 

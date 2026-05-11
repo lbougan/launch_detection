@@ -25,6 +25,5 @@ def list_known_sites(db: Session = Depends(get_db)) -> list[KnownSiteOut]:
     ).all()
 
     return [
-        KnownSiteOut(id=r.id, name=r.name, country=r.country, lon=r.lon, lat=r.lat)
-        for r in rows
+        KnownSiteOut(id=r.id, name=r.name, country=r.country, lon=r.lon, lat=r.lat) for r in rows
     ]

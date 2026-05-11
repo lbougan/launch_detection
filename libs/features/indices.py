@@ -7,7 +7,6 @@ from pathlib import Path
 
 import numpy as np
 import rasterio
-from rasterio.enums import Resampling
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +48,9 @@ def add_indices(stack: np.ndarray) -> np.ndarray:
     ndwi = compute_ndwi(green, nir)
     ndbi = compute_ndbi(swir16, nir)
     bsi = compute_bsi(blue, red, nir, swir16)
-    return np.concatenate([stack.astype(np.float32), ndvi[None], ndwi[None], ndbi[None], bsi[None]], axis=0)
+    return np.concatenate(
+        [stack.astype(np.float32), ndvi[None], ndwi[None], ndbi[None], bsi[None]], axis=0
+    )
 
 
 def build_temporal_composite(

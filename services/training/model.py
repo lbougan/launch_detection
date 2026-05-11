@@ -94,9 +94,7 @@ class DualEncoderUNet(nn.Module):
         opt_features = self.optical_encoder.encoder(optical)
         sar_features = self.sar_encoder.encoder(sar)
 
-        fused_bottleneck = self.fusion_conv(
-            torch.cat([opt_features[-1], sar_features[-1]], dim=1)
-        )
+        fused_bottleneck = self.fusion_conv(torch.cat([opt_features[-1], sar_features[-1]], dim=1))
         opt_features[-1] = fused_bottleneck
 
         decoder_output = self.optical_encoder.decoder(*opt_features)

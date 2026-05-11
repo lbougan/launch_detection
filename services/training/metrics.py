@@ -72,10 +72,7 @@ def false_positive_rate_per_1000km2(
 
     for pred in predicted_polygons:
         pred_pt = Point(pred["centroid_lon"], pred["centroid_lat"])
-        is_tp = any(
-            pred_pt.distance(Point(s["lon"], s["lat"])) < match_deg
-            for s in known_sites
-        )
+        is_tp = any(pred_pt.distance(Point(s["lon"], s["lat"])) < match_deg for s in known_sites)
         if not is_tp:
             fp_count += 1
 
@@ -98,10 +95,7 @@ def calibration_bins(
     is_tp = np.zeros(len(predictions), dtype=bool)
     for i, pred in enumerate(predictions):
         pred_pt = Point(pred["centroid_lon"], pred["centroid_lat"])
-        is_tp[i] = any(
-            pred_pt.distance(Point(s["lon"], s["lat"])) < match_deg
-            for s in known_sites
-        )
+        is_tp[i] = any(pred_pt.distance(Point(s["lon"], s["lat"])) < match_deg for s in known_sites)
 
     bin_edges = np.linspace(0, 1, n_bins + 1)
     bin_accuracy = []

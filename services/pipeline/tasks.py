@@ -18,15 +18,19 @@ from sqlalchemy import create_engine, text
 from torch.utils.data import DataLoader
 
 from libs.config import settings
-from libs.features.indices import add_indices, build_temporal_composite, normalize_percentile
-from libs.geo.masks import apply_cloud_mask
+from libs.features.indices import build_temporal_composite, normalize_percentile
 from libs.geo.postprocess import (
     deduplicate_detections,
     detections_to_geodataframe,
     score_detections,
     threshold_and_extract,
 )
-from libs.geo.tiling import build_dataset_split, build_weak_label_mask, chip_raster, load_known_sites
+from libs.geo.tiling import (
+    build_dataset_split,
+    build_weak_label_mask,
+    chip_raster,
+    load_known_sites,
+)
 from libs.stac.client import ingest_aoi
 from services.training.dataset import LaunchSiteDataset
 from services.training.inference import load_model, sliding_window_inference
@@ -67,17 +71,27 @@ def train_model_task(
         }
 
     train_loader = DataLoader(
-        train_ds, batch_size=batch_size, shuffle=True,
-        num_workers=4, pin_memory=True, collate_fn=_collate,
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+        collate_fn=_collate,
     )
     val_loader = DataLoader(
-        val_ds, batch_size=batch_size, shuffle=False,
-        num_workers=4, pin_memory=True, collate_fn=_collate,
+        val_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True,
+        collate_fn=_collate,
     )
 
     module = LaunchSiteSegModule(
-        model_type=model_type, encoder_name=encoder,
-        in_channels=in_channels, lr=lr,
+        model_type=model_type,
+        encoder_name=encoder,
+        in_channels=in_channels,
+        lr=lr,
     )
 
     mlflow_logger = MLFlowLogger(
@@ -87,7 +101,9 @@ def train_model_task(
 
     callbacks = [
         ModelCheckpoint(
-            monitor="val/loss", mode="min", save_top_k=3,
+            monitor="val/loss",
+            mode="min",
+            save_top_k=3,
             filename="launchsite-{epoch:02d}-{val/loss:.4f}",
         ),
         EarlyStopping(monitor="val/loss", patience=10, mode="min"),
@@ -273,7 +289,11 @@ def postprocess_task(
     detections = deduplicate_detections(detections, method=dedupe_method, eps_deg=dedupe_eps)
 
     gdf = detections_to_geodataframe(detections)
-    return json.loads(gdf.to_json()) if not gdf.empty else {"type": "FeatureCollection", "features": []}
+    return (
+        json.loads(gdf.to_json())
+        if not gdf.empty
+        else {"type": "FeatureCollection", "features": []}
+    )
 
 
 @task(name="store-detections")
