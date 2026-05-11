@@ -103,12 +103,16 @@ def sliding_window_inference(
             batch_coords.append((row, col))
 
             if len(batch_images) == batch_size:
-                _process_batch(model, batch_images, batch_coords, prob_map, count_map, tile_size, device)
+                _process_batch(
+                    model, batch_images, batch_coords, prob_map, count_map, tile_size, device
+                )
                 batch_images = []
                 batch_coords = []
 
         if batch_images:
-            _process_batch(model, batch_images, batch_coords, prob_map, count_map, tile_size, device)
+            _process_batch(
+                model, batch_images, batch_coords, prob_map, count_map, tile_size, device
+            )
 
     valid = count_map > 0
     prob_map[valid] /= count_map[valid]
@@ -138,5 +142,5 @@ def _process_batch(
     probs = torch.sigmoid(logits).squeeze(1).cpu().numpy()
 
     for (row, col), tile_prob in zip(coords, probs):
-        prob_map[row:row + tile_size, col:col + tile_size] += tile_prob
-        count_map[row:row + tile_size, col:col + tile_size] += 1.0
+        prob_map[row : row + tile_size, col : col + tile_size] += tile_prob
+        count_map[row : row + tile_size, col : col + tile_size] += 1.0

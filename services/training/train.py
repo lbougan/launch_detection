@@ -20,7 +20,9 @@ logger = logging.getLogger(__name__)
 
 
 @click.command()
-@click.option("--manifest", type=click.Path(exists=True), required=True, help="Path to chip manifest JSON.")
+@click.option(
+    "--manifest", type=click.Path(exists=True), required=True, help="Path to chip manifest JSON."
+)
 @click.option("--sites", type=click.Path(exists=True), default="data/manifests/known_sites.json")
 @click.option("--model-type", type=click.Choice(["unet", "deeplabv3+"]), default="unet")
 @click.option("--encoder", default="resnet34")
@@ -52,11 +54,19 @@ def train(
     val_ds = LaunchSiteDataset(chip_manifest, known_sites_path, split="val", augment=False)
 
     train_loader = DataLoader(
-        train_ds, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True,
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
         collate_fn=_collate,
     )
     val_loader = DataLoader(
-        val_ds, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True,
+        val_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True,
         collate_fn=_collate,
     )
 
@@ -95,12 +105,15 @@ def train(
 
     logger.info("Starting training: model=%s, encoder=%s, epochs=%d", model_type, encoder, epochs)
     trainer.fit(module, train_loader, val_loader)
-    logger.info("Training complete. Best checkpoint: %s", trainer.checkpoint_callback.best_model_path)
+    logger.info(
+        "Training complete. Best checkpoint: %s", trainer.checkpoint_callback.best_model_path
+    )
 
 
 def _collate(batch: list[dict]) -> dict:
     """Custom collate that handles the meta dict."""
     import torch
+
     return {
         "image": torch.stack([b["image"] for b in batch]),
         "mask": torch.stack([b["mask"] for b in batch]),

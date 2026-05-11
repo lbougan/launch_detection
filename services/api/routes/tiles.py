@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import io
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import Response

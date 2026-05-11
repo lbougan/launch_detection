@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from pathlib import Path
@@ -48,12 +47,8 @@ class TritonSegClient:
         if not self._client.is_server_live():
             raise ConnectionError(f"Triton server at {self.url} is not live")
         if not self._client.is_model_ready(self.model_name, self.model_version):
-            raise RuntimeError(
-                f"Model {self.model_name}:{self.model_version} is not ready"
-            )
-        logger.info(
-            "Connected to Triton at %s, model %s ready", self.url, self.model_name
-        )
+            raise RuntimeError(f"Model {self.model_name}:{self.model_version} is not ready")
+        logger.info("Connected to Triton at %s, model %s ready", self.url, self.model_name)
 
     def infer_batch(self, images: np.ndarray) -> np.ndarray:
         """Send a batch of tiles and return sigmoid probabilities.
@@ -149,9 +144,7 @@ def _sigmoid(x: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-x))
 
 
-def _tile_windows(
-    height: int, width: int, tile_size: int, overlap: int
-) -> list[tuple[int, int]]:
+def _tile_windows(height: int, width: int, tile_size: int, overlap: int) -> list[tuple[int, int]]:
     """Generate (row, col) top-left coordinates for sliding windows."""
     step = tile_size - overlap
     windows = []

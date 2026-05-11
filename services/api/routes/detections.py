@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
-from geoalchemy2.functions import ST_AsGeoJSON, ST_Envelope, ST_MakeEnvelope, ST_X, ST_Y
+from geoalchemy2.functions import ST_MakeEnvelope
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -52,6 +52,7 @@ def list_detections(
     detections = []
     for row in rows:
         import json
+
         bbox_geo = json.loads(row.bbox_geojson)
         coords = bbox_geo["coordinates"][0]
         flat_bbox = [coords[0][0], coords[0][1], coords[2][0], coords[2][1]]
@@ -103,9 +104,11 @@ def get_detection(detection_id: int, db: Session = Depends(get_db)) -> Detection
 
     if not row:
         from fastapi import HTTPException
+
         raise HTTPException(status_code=404, detail="Detection not found")
 
     import json
+
     bbox_geo = json.loads(row.bbox_geojson)
     coords = bbox_geo["coordinates"][0]
     flat_bbox = [coords[0][0], coords[0][1], coords[2][0], coords[2][1]]

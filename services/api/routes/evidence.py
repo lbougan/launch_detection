@@ -39,6 +39,7 @@ def get_evidence(
         raise HTTPException(status_code=404, detail="Detection not found")
 
     import json
+
     return {
         "detection_id": detection_id,
         "score": row.score,
@@ -59,11 +60,7 @@ def get_evidence_thumbnail(
 
     Returns a false-color RGB thumbnail for visual inspection.
     """
-    row = (
-        db.query(Detection.evidence)
-        .filter(Detection.id == detection_id)
-        .first()
-    )
+    row = db.query(Detection.evidence).filter(Detection.id == detection_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Detection not found")
 
@@ -86,6 +83,7 @@ def get_evidence_thumbnail(
     rgb = rgb.astype(np.uint8)
 
     from PIL import Image
+
     img = Image.fromarray(np.moveaxis(rgb, 0, -1))
     buf = io.BytesIO()
     img.save(buf, format="PNG")

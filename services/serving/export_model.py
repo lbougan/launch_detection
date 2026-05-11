@@ -42,9 +42,7 @@ def export_to_onnx(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    module = LaunchSiteSegModule.load_from_checkpoint(
-        str(checkpoint_path), map_location="cpu"
-    )
+    module = LaunchSiteSegModule.load_from_checkpoint(str(checkpoint_path), map_location="cpu")
     module.eval()
     model = module.model
 
@@ -93,19 +91,13 @@ def _validate_onnx(
 
     if not np.allclose(pt_out, ort_out, atol=atol):
         max_diff = float(np.max(np.abs(pt_out - ort_out)))
-        raise ValueError(
-            f"ONNX validation failed: max abs diff {max_diff:.6e} exceeds atol {atol}"
-        )
+        raise ValueError(f"ONNX validation failed: max abs diff {max_diff:.6e} exceeds atol {atol}")
     logger.info("ONNX validation passed (atol=%s)", atol)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Export LaunchSiteSegModule checkpoint to ONNX"
-    )
-    parser.add_argument(
-        "--checkpoint", required=True, help="Path to .ckpt Lightning checkpoint"
-    )
+    parser = argparse.ArgumentParser(description="Export LaunchSiteSegModule checkpoint to ONNX")
+    parser.add_argument("--checkpoint", required=True, help="Path to .ckpt Lightning checkpoint")
     parser.add_argument(
         "--output",
         default="model_repository/unet_seg/1/model.onnx",
@@ -114,9 +106,7 @@ def main() -> None:
     parser.add_argument("--in-channels", type=int, default=DEFAULT_IN_CHANNELS)
     parser.add_argument("--tile-size", type=int, default=DEFAULT_TILE_SIZE)
     parser.add_argument("--opset", type=int, default=17)
-    parser.add_argument(
-        "--skip-validation", action="store_true", help="Skip ORT validation"
-    )
+    parser.add_argument("--skip-validation", action="store_true", help="Skip ORT validation")
 
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")

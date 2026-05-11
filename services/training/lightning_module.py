@@ -6,7 +6,6 @@ from typing import Any
 
 import pytorch_lightning as pl
 import torch
-import torch.nn as nn
 from torchmetrics import AUROC, F1Score, Precision, Recall
 
 from services.training.losses import CombinedLoss

@@ -101,9 +101,7 @@ def memory_optimized_inference(
             h, w = src.height, src.width
             profile = src.profile.copy()
 
-            strip_height = _estimate_strip_height(
-                w, tile_size, overlap, batch_size, max_memory_mb
-            )
+            strip_height = _estimate_strip_height(w, tile_size, overlap, batch_size, max_memory_mb)
             logger.info(
                 "Raster %dx%d, strip_height=%d, memory_budget=%.0f MB",
                 w,
