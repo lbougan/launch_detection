@@ -103,6 +103,7 @@ def ingest_and_preprocess_flow(
 def train_flow(
     manifest_path: str = "data/manifests/chip_manifest.json",
     known_sites_path: str = "data/manifests/known_sites.json",
+    stats_path: str = "data/manifests/channel_stats.json",
     model_type: str = "unet",
     encoder: str = "resnet34",
     in_channels: int = 10,
@@ -118,7 +119,7 @@ def train_flow(
     """
     best_ckpt = train_model_task(
         manifest_path=manifest_path,
-        known_sites_path=known_sites_path,
+        stats_path=stats_path,
         model_type=model_type,
         encoder=encoder,
         in_channels=in_channels,

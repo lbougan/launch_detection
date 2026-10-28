@@ -7,10 +7,8 @@ import logging
 import os
 from pathlib import Path
 
-import numpy as np
 import pytorch_lightning as pl
 import rasterio
-import torch
 from prefect import task
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import MLFlowLogger
@@ -21,20 +19,17 @@ from libs.config import settings
 from libs.features.indices import build_temporal_composite
 from libs.features.stats import compute_channel_stats, save_stats
 from libs.geo.bandspec import write_bandspec
+from libs.geo.chips import chip_raster, load_known_sites
+from libs.geo.labels import build_label_mask, write_label
 from libs.geo.postprocess import (
     deduplicate_detections,
     detections_to_geodataframe,
     score_detections,
     threshold_and_extract,
 )
-from libs.geo.tiling import (
-    build_dataset_split,
-    build_weak_label_mask,
-    chip_raster,
-    load_known_sites,
-)
+from libs.geo.tiling import build_dataset_split
 from libs.stac.client import ingest_aoi
-from services.training.dataset import LaunchSiteDataset
+from services.training.dataset import LaunchSiteDataset, collate
 from services.training.inference import load_model, sliding_window_inference
 from services.training.lightning_module import LaunchSiteSegModule
 
@@ -46,7 +41,7 @@ logger = logging.getLogger(__name__)
 @task(name="train-model")
 def train_model_task(
     manifest_path: str,
-    known_sites_path: str = "data/manifests/known_sites.json",
+    stats_path: str = "data/manifests/channel_stats.json",
     model_type: str = "unet",
     encoder: str = "resnet34",
     in_channels: int = 10,
@@ -60,17 +55,8 @@ def train_model_task(
     with open(manifest_path) as f:
         chip_manifest = json.load(f)
 
-    sites = Path(known_sites_path)
-
-    train_ds = LaunchSiteDataset(chip_manifest, sites, split="train", augment=True)
-    val_ds = LaunchSiteDataset(chip_manifest, sites, split="val", augment=False)
-
-    def _collate(batch: list[dict]) -> dict:
-        return {
-            "image": torch.stack([b["image"] for b in batch]),
-            "mask": torch.stack([b["mask"] for b in batch]),
-            "meta": [b["meta"] for b in batch],
-        }
+    train_ds = LaunchSiteDataset(chip_manifest, Path(stats_path), split="train", augment=True)
+    val_ds = LaunchSiteDataset(chip_manifest, Path(stats_path), split="val", augment=False)
 
     train_loader = DataLoader(
         train_ds,
@@ -78,7 +64,7 @@ def train_model_task(
         shuffle=True,
         num_workers=4,
         pin_memory=True,
-        collate_fn=_collate,
+        collate_fn=collate,
     )
     val_loader = DataLoader(
         val_ds,
@@ -86,7 +72,7 @@ def train_model_task(
         shuffle=False,
         num_workers=4,
         pin_memory=True,
-        collate_fn=_collate,
+        collate_fn=collate,
     )
 
     module = LaunchSiteSegModule(
@@ -208,14 +194,10 @@ def build_labels_task(
     enriched = build_dataset_split(chip_manifest, sites)
 
     for chip in enriched:
-        mask = build_weak_label_mask(
-            bbox=chip["bbox"],
-            tile_size=256,
-            known_sites=sites,
-        )
-        label_path = Path(chip["path"]).parent / f"{chip['tile_id']}_label.npy"
-        np.save(label_path, mask)
-        chip["label_path"] = str(label_path)
+        with rasterio.open(chip["path"]) as src:
+            mask = build_label_mask(src, sites)
+            label_path = Path(chip["path"]).parent / f"{chip['tile_id']}_label.tif"
+            chip["label_path"] = str(write_label(label_path, mask, src))
 
     return enriched
 

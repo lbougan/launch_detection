@@ -13,7 +13,7 @@ from pytorch_lightning.loggers import MLFlowLogger
 from torch.utils.data import DataLoader
 
 from libs.config import settings
-from services.training.dataset import LaunchSiteDataset
+from services.training.dataset import LaunchSiteDataset, collate
 from services.training.lightning_module import LaunchSiteSegModule
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,12 @@ logger = logging.getLogger(__name__)
 @click.option(
     "--manifest", type=click.Path(exists=True), required=True, help="Path to chip manifest JSON."
 )
-@click.option("--sites", type=click.Path(exists=True), default="data/manifests/known_sites.json")
+@click.option(
+    "--stats",
+    type=click.Path(exists=True),
+    default="data/manifests/channel_stats.json",
+    help="Channel statistics JSON used to standardise inputs.",
+)
 @click.option("--model-type", type=click.Choice(["unet", "deeplabv3+"]), default="unet")
 @click.option("--encoder", default="resnet34")
 @click.option("--in-channels", default=10, type=int)
@@ -34,7 +39,7 @@ logger = logging.getLogger(__name__)
 @click.option("--experiment-name", default="launchsite-seg")
 def train(
     manifest: str,
-    sites: str,
+    stats: str,
     model_type: str,
     encoder: str,
     in_channels: int,
@@ -48,10 +53,10 @@ def train(
     with open(manifest) as f:
         chip_manifest = json.load(f)
 
-    known_sites_path = Path(sites)
+    stats_path = Path(stats)
 
-    train_ds = LaunchSiteDataset(chip_manifest, known_sites_path, split="train", augment=True)
-    val_ds = LaunchSiteDataset(chip_manifest, known_sites_path, split="val", augment=False)
+    train_ds = LaunchSiteDataset(chip_manifest, stats_path, split="train", augment=True)
+    val_ds = LaunchSiteDataset(chip_manifest, stats_path, split="val", augment=False)
 
     train_loader = DataLoader(
         train_ds,
@@ -59,7 +64,7 @@ def train(
         shuffle=True,
         num_workers=4,
         pin_memory=True,
-        collate_fn=_collate,
+        collate_fn=collate,
     )
     val_loader = DataLoader(
         val_ds,
@@ -67,7 +72,7 @@ def train(
         shuffle=False,
         num_workers=4,
         pin_memory=True,
-        collate_fn=_collate,
+        collate_fn=collate,
     )
 
     module = LaunchSiteSegModule(
@@ -108,17 +113,6 @@ def train(
     logger.info(
         "Training complete. Best checkpoint: %s", trainer.checkpoint_callback.best_model_path
     )
-
-
-def _collate(batch: list[dict]) -> dict:
-    """Custom collate that handles the meta dict."""
-    import torch
-
-    return {
-        "image": torch.stack([b["image"] for b in batch]),
-        "mask": torch.stack([b["mask"] for b in batch]),
-        "meta": [b["meta"] for b in batch],
-    }
 
 
 if __name__ == "__main__":

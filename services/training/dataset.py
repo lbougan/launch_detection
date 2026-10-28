@@ -1,4 +1,4 @@
-"""PyTorch dataset for launch-site segmentation tiles."""
+"""Chips + georeferenced label GeoTIFFs -> (image, mask, weight) tensors."""
 
 from __future__ import annotations
 
@@ -10,79 +10,73 @@ import rasterio
 import torch
 from torch.utils.data import Dataset
 
-from libs.features.indices import add_indices, normalize_percentile
-from libs.geo.bandspec import S2_BAND_NAMES
-from libs.geo.tiling import build_weak_label_mask, load_known_sites
+from libs.features.indices import add_indices, normalize
+from libs.features.stats import load_stats
+from libs.geo.bandspec import read_bandspec
+from libs.geo.labels import POSITIVE, read_label, weight_from_label
 
 
 class LaunchSiteDataset(Dataset):
-    """Dataset that loads tiled imagery chips and weak label masks.
-
-    Each sample returns:
-        image: (C, H, W) float32 tensor — normalized bands + indices
-        mask:  (1, H, W) float32 tensor — weak label (0/1/0.5)
-        meta:  dict with tile_id, bbox, split
-    """
+    """Each sample: image (C,H,W) standardised, mask (1,H,W) in {0,1}, weight (1,H,W) in {0,1}."""
 
     def __init__(
         self,
         chip_manifest: list[dict],
-        known_sites_path: Path,
+        stats_path: Path,
         split: str = "train",
-        use_indices: bool = True,
         augment: bool = False,
     ):
-        self.known_sites = load_known_sites(known_sites_path)
-        self.use_indices = use_indices
+        self.stats = load_stats(stats_path)
         self.augment = augment
-        self.chips = [c for c in chip_manifest if c.get("split", "train") == split]
+        self.chips = [c for c in chip_manifest if c.get("split") == split]
+        missing = [c["tile_id"] for c in self.chips if "label_path" not in c]
+        if missing:
+            raise ValueError(f"{len(missing)} chips have no label_path (run build_labels first)")
 
     def __len__(self) -> int:
         return len(self.chips)
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         chip = self.chips[idx]
-
         with rasterio.open(chip["path"]) as src:
             image = src.read().astype(np.float32)
+            spec = read_bandspec(src)
+        image, _ = add_indices(image, spec.names)
+        image = normalize(image, self.stats)
+        image = np.nan_to_num(
+            image, nan=0.0
+        )  # cloud holes become the channel mean after standardisation
 
-        image = normalize_percentile(image)
-
-        if self.use_indices and image.shape[0] == 6:
-            image = add_indices(image, S2_BAND_NAMES)[0]
-
-        mask = build_weak_label_mask(
-            bbox=chip["bbox"],
-            tile_size=image.shape[-1],
-            known_sites=self.known_sites,
-        )
+        label = read_label(chip["label_path"])
+        weight = weight_from_label(label)
+        mask = (label >= POSITIVE).astype(np.float32)
 
         if self.augment:
-            image, mask = self._augment(image, mask)
+            image, mask, weight = _augment(image, mask, weight)
 
         return {
-            "image": torch.from_numpy(image),
-            "mask": torch.from_numpy(mask[None]),  # (1, H, W)
-            "meta": {
-                "tile_id": chip["tile_id"],
-                "bbox": chip["bbox"],
-                "split": chip.get("split", "train"),
-            },
+            "image": torch.from_numpy(image.astype(np.float32)),
+            "mask": torch.from_numpy(mask[None]),
+            "weight": torch.from_numpy(weight[None]),
+            "meta": {"tile_id": chip["tile_id"], "bbox": chip["bbox"], "split": chip.get("split")},
         }
 
-    @staticmethod
-    def _augment(image: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Simple geometric augmentations (random flips and 90-degree rotations)."""
-        k = np.random.randint(0, 4)
-        image = np.rot90(image, k, axes=(1, 2)).copy()
-        mask = np.rot90(mask, k, axes=(0, 1)).copy()
 
-        if np.random.random() > 0.5:
-            image = np.flip(image, axis=2).copy()
-            mask = np.flip(mask, axis=1).copy()
+def _augment(image: np.ndarray, mask: np.ndarray, weight: np.ndarray):
+    k = np.random.randint(0, 4)
+    image = np.rot90(image, k, axes=(1, 2))
+    mask, weight = np.rot90(mask, k), np.rot90(weight, k)
+    if np.random.random() > 0.5:
+        image, mask, weight = image[:, :, ::-1], mask[:, ::-1], weight[:, ::-1]
+    if np.random.random() > 0.5:
+        image, mask, weight = image[:, ::-1, :], mask[::-1, :], weight[::-1, :]
+    return image.copy(), mask.copy(), weight.copy()
 
-        if np.random.random() > 0.5:
-            image = np.flip(image, axis=1).copy()
-            mask = np.flip(mask, axis=0).copy()
 
-        return image, mask
+def collate(batch: list[dict]) -> dict:
+    return {
+        "image": torch.stack([b["image"] for b in batch]),
+        "mask": torch.stack([b["mask"] for b in batch]),
+        "weight": torch.stack([b["weight"] for b in batch]),
+        "meta": [b["meta"] for b in batch],
+    }

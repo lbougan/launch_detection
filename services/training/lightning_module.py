@@ -28,7 +28,6 @@ class LaunchSiteSegModule(pl.LightningModule):
         focal_alpha: float = 0.25,
         focal_gamma: float = 2.0,
         dice_weight: float = 0.5,
-        label_smoothing: float = 0.05,
         scheduler_patience: int = 5,
     ):
         super().__init__()
@@ -41,7 +40,7 @@ class LaunchSiteSegModule(pl.LightningModule):
         else:
             raise ValueError(f"Unknown model_type: {model_type}")
 
-        self.loss_fn = CombinedLoss(focal_alpha, focal_gamma, dice_weight, label_smoothing)
+        self.loss_fn = CombinedLoss(focal_alpha, focal_gamma, dice_weight)
 
         self.val_f1 = F1Score(task="binary")
         self.val_precision = Precision(task="binary")
@@ -53,22 +52,23 @@ class LaunchSiteSegModule(pl.LightningModule):
 
     def training_step(self, batch: dict[str, Any], batch_idx: int) -> torch.Tensor:
         logits = self(batch["image"])
-        loss = self.loss_fn(logits, batch["mask"])
+        loss = self.loss_fn(logits, batch["mask"], batch["weight"])
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         return loss
 
     def validation_step(self, batch: dict[str, Any], batch_idx: int) -> None:
         logits = self(batch["image"])
-        loss = self.loss_fn(logits, batch["mask"])
+        loss = self.loss_fn(logits, batch["mask"], batch["weight"])
 
-        preds = (torch.sigmoid(logits) > 0.5).long().flatten()
-        targets = (batch["mask"] > 0.5).long().flatten()
+        valid = (batch["weight"] > 0).flatten()
+        preds = (torch.sigmoid(logits) > 0.5).long().flatten()[valid]
+        targets = (batch["mask"] >= 0.5).long().flatten()[valid]
 
         self.val_f1.update(preds, targets)
         self.val_precision.update(preds, targets)
         self.val_recall.update(preds, targets)
 
-        probs_flat = torch.sigmoid(logits).flatten()
+        probs_flat = torch.sigmoid(logits).flatten()[valid]
         if targets.sum() > 0 and (targets == 0).sum() > 0:
             self.val_auroc.update(probs_flat, targets)
 
