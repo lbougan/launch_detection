@@ -127,7 +127,9 @@ def run_sliding_window(
         finally:
             acc.close()
     profile.update(count=1, dtype="float32", nodata=float("nan"), compress="deflate")
-    for key in ("tags", "blockxsize", "blockysize", "tiled"):  # stale layout/BANDSPEC
+    # rasterio profiles do not carry tags, but older writers might; never copy a stale BANDSPEC
+    profile.pop("tags", None)
+    for key in ("blockxsize", "blockysize", "tiled"):  # stale layout from the source
         profile.pop(key, None)
     with rasterio.open(output_path, "w", **profile) as dst:
         dst.write(prob, 1)

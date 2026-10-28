@@ -157,6 +157,7 @@ def scan_and_detect_flow(
     model_version: str = "v0.1",
     threshold: float = 0.5,
     stats_path: str = str(default_stats_path()),
+    device: str = "cpu",
     serving_mode: str = "",
     triton_url: str = "",
 ) -> int:
@@ -166,6 +167,7 @@ def scan_and_detect_flow(
         serving_mode: ``"local"`` for in-process PyTorch, ``"triton"`` for
             Triton Inference Server. Defaults to ``"triton"`` when the
             ``TRITON_URL`` env var is set, otherwise ``"local"``.
+        device: Torch device for ``serving_mode='local'``.
         stats_path: Channel stats written at training time (must match the checkpoint).
         triton_url: Triton gRPC endpoint (overrides ``TRITON_URL`` env var).
 
@@ -198,6 +200,7 @@ def scan_and_detect_flow(
             serving_mode=serving_mode,
             checkpoint_path=checkpoint_path,
             triton_url=triton_url,
+            device=device,
         )
 
         geojson = postprocess_task(
@@ -300,6 +303,7 @@ if __name__ == "__main__":
         "Default: auto-detect via TRITON_URL env var.",
     )
     p_detect.add_argument("--stats", default=str(default_stats_path()))
+    p_detect.add_argument("--device", default="cpu", help="Torch device for local serving")
     p_detect.add_argument("--triton-url", default="", help="Triton gRPC endpoint")
 
     args = parser.parse_args()
@@ -337,6 +341,7 @@ if __name__ == "__main__":
             checkpoint_path=args.checkpoint,
             model_version=args.model_version,
             stats_path=args.stats,
+            device=args.device,
             serving_mode=args.serving_mode,
             triton_url=args.triton_url,
         )

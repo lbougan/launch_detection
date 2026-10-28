@@ -226,6 +226,7 @@ def run_inference_task(
     tile: int = 256,
     overlap: int = 64,
     batch_size: int = 16,
+    device: str = "cpu",
 ) -> str:
     """Run sliding-window inference over a raster with a local or Triton predictor."""
     if serving_mode == "triton":
@@ -240,20 +241,25 @@ def run_inference_task(
 
         if not checkpoint_path:
             raise ValueError("checkpoint_path is required for serving_mode='local'")
-        predictor = LocalTorchPredictor.from_checkpoint(checkpoint_path)
+        predictor = LocalTorchPredictor.from_checkpoint(checkpoint_path, device=device)
     else:
         raise ValueError(f"Unknown serving_mode: {serving_mode!r}")
 
-    result = run_sliding_window(
-        raster_path=Path(raster_path),
-        output_path=Path(output_path),
-        predictor=predictor,
-        stats=load_stats(Path(stats_path)),
-        tile=tile,
-        overlap=overlap,
-        batch_size=batch_size,
-        memmap=memmap,
-    )
+    try:
+        result = run_sliding_window(
+            raster_path=Path(raster_path),
+            output_path=Path(output_path),
+            predictor=predictor,
+            stats=load_stats(Path(stats_path)),
+            tile=tile,
+            overlap=overlap,
+            batch_size=batch_size,
+            memmap=memmap,
+        )
+    finally:
+        close = getattr(predictor, "close", None)
+        if callable(close):
+            close()
     return str(result)
 
 

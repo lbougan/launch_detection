@@ -66,7 +66,7 @@ def test_run_sliding_window_writes_prob_raster_with_edge_coverage(tmp_path):
         assert src.width == 290 and src.height == 300
         assert src.crs.to_epsg() == 32633
         assert src.count == 1 and np.isnan(src.nodata)
-        assert "BANDSPEC" not in str(src.tags())
+        assert "BANDSPEC" not in src.tags()
     assert not np.isnan(prob).any(), "every pixel incl. the right/bottom strip is predicted"
     np.testing.assert_allclose(prob, 0.7, atol=1e-6)
 

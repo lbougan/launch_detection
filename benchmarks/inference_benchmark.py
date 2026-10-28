@@ -9,7 +9,13 @@ Usage:
         --batch-sizes 1,8,16,32 \
         --overlaps 0,32,64
 
-Results are written to benchmarks/results/ as JSON.
+Modes: baseline (local torch), triton, triton_memopt (triton + memmap accumulator), plus
+fake / fake_memmap (constant predictor, no model or server) for smoke tests.
+
+Results are written to benchmarks/results/ as JSON (not written, exit code 1, if nothing ran).
+
+Caveats: ``peak_rss_mb`` is process-wide (ru_maxrss), so later modes include the peaks of earlier
+ones. ``peak_tracemalloc_mb`` does not count memmap pages (they live in the OS page cache).
 """
 
 from __future__ import annotations
@@ -65,19 +71,6 @@ class BenchmarkResult:
         d["p95_ms"] = self.p95_ms
         d["p99_ms"] = self.p99_ms
         return d
-
-
-def _gpu_utilization() -> float | None:
-    """Sample current GPU utilization percentage, or None if unavailable."""
-    try:
-        import pynvml
-
-        pynvml.nvmlInit()
-        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-        util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-        return float(util.gpu)
-    except Exception:
-        return None
 
 
 def create_synthetic_raster(size: int, tmpdir: str) -> Path:
@@ -162,6 +155,10 @@ def benchmark_mode(
 
 def _build_mode(mode: str, args) -> tuple[object, bool] | None:
     """Return (predictor, memmap) for a mode name, or None if unknown."""
+    if mode in ("fake", "fake_memmap"):
+        from libs.inference.predictors import FakePredictor
+
+        return FakePredictor(), mode == "fake_memmap"
     if mode == "baseline":
         from libs.inference.predictors import LocalTorchPredictor
 
@@ -290,6 +287,10 @@ def main() -> None:
                             )
                         except Exception:
                             logger.exception("  -> FAILED: %s", label)
+
+    if not built or not all_results:
+        logger.error("No benchmark results produced; not writing a results file")
+        raise SystemExit(1)
 
     _print_table(all_results)
 

@@ -66,3 +66,8 @@ class TritonPredictor:
 
     def predict(self, batch: np.ndarray) -> np.ndarray:
         return np.asarray(self.client.infer_batch(batch), dtype=np.float32)
+
+    def close(self) -> None:
+        close = getattr(self.client, "close", None)
+        if callable(close):
+            close()
