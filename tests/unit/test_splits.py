@@ -1,3 +1,5 @@
+import pytest
+
 from libs.geo.splits import aoi_split, assign_splits, count_by_split
 
 SITES = [
@@ -41,3 +43,13 @@ def test_aoi_split_uses_site_nearest_to_bbox_centre():
 def test_count_by_split():
     chips = [{"split": "train"}, {"split": "train"}, {"split": "test"}]
     assert count_by_split(chips) == {"train": 2, "test": 1}
+
+
+def test_missing_site_raises():
+    with pytest.raises(ValueError, match="missing"):
+        assign_splits([], SITES, {"train": ["A"]})
+
+
+def test_unknown_split_key_raises():
+    with pytest.raises(ValueError, match="unknown split keys"):
+        assign_splits([], SITES, {"train": ["A"], "vall": ["B"]})

@@ -2,12 +2,16 @@
 
 A chip belongs to the split of the nearest known site if that site is within
 `exclusion_km`; otherwise it is background and goes to train. So no training chip lies
-within `exclusion_km` of a validation or test site.
+within `exclusion_km` of a validation or test site. This holds when every held-out site
+is more than 2 x exclusion_km from every training site; `tests/unit/test_manifests.py`
+enforces it.
 """
 
 from __future__ import annotations
 
 from libs.geo.projection import distance_m
+
+SPLIT_KEYS = ("train", "val", "test")
 
 
 def _centroid(bbox: list[float]) -> tuple[float, float]:
@@ -15,9 +19,10 @@ def _centroid(bbox: list[float]) -> tuple[float, float]:
 
 
 def _site_split_map(sites: list[dict], splits: dict[str, list[str]]) -> dict[str, str]:
-    site_split = {
-        name: split for split, names in splits.items() if isinstance(names, list) for name in names
-    }
+    bad_keys = [k for k, v in splits.items() if isinstance(v, list) and k not in SPLIT_KEYS]
+    if bad_keys:
+        raise ValueError(f"unknown split keys {bad_keys}; allowed: {list(SPLIT_KEYS)}")
+    site_split = {name: split for split in SPLIT_KEYS for name in splits.get(split, [])}
     unknown = [s["name"] for s in sites if s["name"] not in site_split]
     if unknown:
         raise ValueError(f"sites missing from splits.json: {unknown}")

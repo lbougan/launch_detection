@@ -42,12 +42,33 @@ def test_splits_cover_all_sites_exactly_once():
     ]
 
 
+def _dist(sites, a, b):
+    return distance_m(sites[a]["lon"], sites[a]["lat"], sites[b]["lon"], sites[b]["lat"])
+
+
 def test_held_out_sites_are_far_from_each_other_and_from_training_sites():
     sites = {s["name"]: s for s in _load("known_sites.json")["sites"]}
     splits = _load("splits.json")
-    for held in splits["val"] + splits["test"]:
+    threshold = max(50_000, 2 * splits["exclusion_km"] * 1000)
+    held_out = splits["val"] + splits["test"]
+    for held in held_out:
         for other in splits["train"]:
-            d = distance_m(
-                sites[held]["lon"], sites[held]["lat"], sites[other]["lon"], sites[other]["lat"]
+            assert _dist(sites, held, other) > threshold, (
+                f"{held} is too close to training site {other}"
             )
-            assert d > 50_000, f"{held} is within 50 km of training site {other}"
+    for v in splits["val"]:
+        for t in splits["test"]:
+            assert _dist(sites, v, t) > threshold, f"val site {v} is too close to test site {t}"
+
+
+def test_each_aoi_contains_sites_of_one_split_only():
+    sites = _load("known_sites.json")["sites"]
+    splits = _load("splits.json")
+    site_split = {n: s for s in ("train", "val", "test") for n in splits[s]}
+    for a in _load("aoi_config.json")["aois"]:
+        inside = {
+            site_split[s["name"]]
+            for s in sites
+            if a["bbox"][0] <= s["lon"] <= a["bbox"][2] and a["bbox"][1] <= s["lat"] <= a["bbox"][3]
+        }
+        assert len(inside) <= 1, f"AOI {a['name']} mixes splits: {inside}"
