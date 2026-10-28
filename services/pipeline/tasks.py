@@ -126,14 +126,17 @@ def assign_splits_task(
     chip_manifest: list[dict],
     known_sites_path: str,
     splits_path: str,
+    aois: list[dict] | None = None,
 ) -> list[dict]:
-    """Assign site-held-out train/val/test splits to chips."""
+    """Assign site-held-out train/val/test splits to chips (all chips of a held-out AOI too)."""
     from libs.geo.chips import load_known_sites
     from libs.geo.splits import assign_splits
 
     sites = load_known_sites(Path(known_sites_path))
     splits = json.loads(Path(splits_path).read_text())
-    return assign_splits(chip_manifest, sites, splits, exclusion_km=float(splits["exclusion_km"]))
+    return assign_splits(
+        chip_manifest, sites, splits, exclusion_km=float(splits["exclusion_km"]), aois=aois
+    )
 
 
 @task(name="build-labels")
@@ -163,7 +166,7 @@ def build_labels_task(
 def run_inference_task(
     raster_path: str,
     output_path: str,
-    stats_path: str,
+    stats_path: str,  # "" -> the local checkpoint's embedded stats
     serving_mode: str,
     checkpoint_path: str = "",
     triton_url: str = "",
@@ -173,8 +176,12 @@ def run_inference_task(
     batch_size: int = 16,
     device: str = "cpu",
 ) -> str:
-    """Run sliding-window inference over a raster with a local or Triton predictor."""
-    from libs.features.stats import load_stats
+    """Run sliding-window inference over a raster with a local or Triton predictor.
+
+    A local checkpoint's embedded stats are used; a `stats_path` given as well must match them.
+    Triton models need `stats_path`.
+    """
+    from libs.features.stats import resolve_stats
     from libs.inference.sliding_window import run_sliding_window
 
     if serving_mode == "triton":
@@ -194,11 +201,12 @@ def run_inference_task(
         raise ValueError(f"Unknown serving_mode: {serving_mode!r}")
 
     try:
+        stats = resolve_stats(getattr(predictor, "stats", None), stats_path or None)
         result = run_sliding_window(
             raster_path=Path(raster_path),
             output_path=Path(output_path),
             predictor=predictor,
-            stats=load_stats(Path(stats_path)),
+            stats=stats,
             tile=tile,
             overlap=overlap,
             batch_size=batch_size,

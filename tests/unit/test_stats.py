@@ -40,3 +40,21 @@ def test_stats_reject_mismatched_channel_names(tmp_path):
         write_bandspec(dst, BandSpec(names=("green", "blue", "red", "nir", "swir16", "swir22")))
     with pytest.raises(ValueError, match="channel"):
         compute_channel_stats([a, b])
+
+
+STATS = {"channels": ["a"], "p2": [0.0], "p98": [1.0], "mean": [0.5], "std": [0.2]}
+
+
+def test_resolve_stats_prefers_the_checkpoint_and_checks_a_given_file(tmp_path):
+    from libs.features.stats import resolve_stats
+
+    same, other = tmp_path / "same.json", tmp_path / "other.json"
+    save_stats(STATS, same)
+    save_stats({**STATS, "mean": [0.4]}, other)
+    assert resolve_stats(STATS, None) == STATS
+    assert resolve_stats(STATS, same) == STATS
+    assert resolve_stats(None, same) == STATS
+    with pytest.raises(ValueError, match="differ from the stats embedded in the checkpoint"):
+        resolve_stats(STATS, other)
+    with pytest.raises(ValueError, match="no normalisation stats"):
+        resolve_stats(None, None)

@@ -23,7 +23,7 @@ import numpy as np
 import rasterio
 from rasterio.windows import Window
 
-from libs.features.indices import add_indices, normalize
+from libs.features.indices import add_indices, check_stats_channels, normalize
 from libs.geo.bandspec import read_bandspec
 from libs.inference.predictors import Predictor
 
@@ -106,7 +106,8 @@ def read_tile(
     data = src.read(window=Window(col, row, w, h)).astype(np.float32)
     if h < tile or w < tile:  # raster smaller than a tile: reflect-pad
         data = np.pad(data, ((0, 0), (0, tile - h), (0, tile - w)), mode="reflect")
-    data, _ = add_indices(data, names)
+    data, channels = add_indices(data, names)
+    check_stats_channels(channels, stats)
     data = normalize(data, stats)
     return np.nan_to_num(data, nan=0.0)
 

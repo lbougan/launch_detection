@@ -32,3 +32,19 @@ def test_dataset_returns_normalised_image_mask_and_weight(small_composite, tmp_p
     assert not torch.isnan(sample["image"]).any()
     assert abs(float(sample["image"].mean())) < 3.0  # standardised
     assert np.isin(sample["mask"].numpy(), [0.0, 1.0]).all()
+
+
+def test_dataset_rejects_stats_for_other_channels(small_composite, tmp_path):
+    import json
+
+    import pytest
+
+    path, _ = small_composite
+    chips = chip_raster(path, tmp_path / "tiles", tile_size=128, overlap=32)[:1]
+    chips = [{**chips[0], "split": "train", "label_path": "unused.tif"}]
+    stats = compute_channel_stats([path], sample_px=2000)
+    stats_path = tmp_path / "stats.json"
+    stats_path.write_text(json.dumps({**stats, "channels": list(reversed(stats["channels"]))}))
+    ds = LaunchSiteDataset(chips, stats_path, split="train")
+    with pytest.raises(ValueError, match="channels"):
+        ds[0]

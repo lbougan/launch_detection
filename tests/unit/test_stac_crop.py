@@ -88,3 +88,76 @@ def test_bbox_to_native_is_identity_in_epsg4326():
 
     out = _bbox_to_native([10.0, 20.0, 11.0, 21.0], CRS.from_epsg(4326))
     assert out == pytest.approx((10.0, 20.0, 11.0, 21.0))
+
+
+def test_aoi_target_grid_is_one_utm_grid_at_10_m():
+    from libs.stac.client import aoi_target_grid
+
+    g = aoi_target_grid([80.1, 13.6, 80.4, 13.9])  # Sriharikota, UTM 44N
+    assert g.crs.to_epsg() == 32644
+    assert g.transform.a == 10.0 and g.transform.e == -10.0
+    assert 3150 < g.width < 3400 and 3250 < g.height < 3400, (g.width, g.height)
+    assert g.transform.c % 10 == 0 and g.transform.f % 10 == 0, "snapped to the 10 m lattice"
+    south = aoi_target_grid([-52.9, 5.1, -52.6, 5.4])  # Kourou, UTM 22N
+    assert south.crs.to_epsg() == 32622
+    assert aoi_target_grid([-52.9, -5.4, -52.6, -5.1]).crs.to_epsg() == 32722
+
+
+def _write_band(path, data, crs, transform, nodata=None):
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=data.shape[1],
+        height=data.shape[0],
+        count=1,
+        dtype=data.dtype,
+        crs=crs,
+        transform=transform,
+        nodata=nodata,
+    ) as dst:
+        dst.write(data, 1)
+    return str(path)
+
+
+def test_download_scene_crop_lands_every_scene_on_the_aoi_grid(tmp_path):
+    """Two 'scenes' in different UTM zones, read as local files, end up on one identical grid."""
+    from rasterio.transform import from_origin
+
+    from libs.stac.client import SceneMetadata, aoi_target_grid, download_scene_crop
+
+    bbox = [17.95, 40.0, 18.05, 40.05]  # straddles the 33N / 34N boundary at 18 E
+    grid = aoi_target_grid(bbox)
+    out = []
+    for i, epsg in enumerate((32633, 32634)):
+        tr = rasterio.warp.transform("EPSG:4326", f"EPSG:{epsg}", [bbox[0]], [bbox[3]])
+        x0, y0 = tr[0][0] - 2_000, tr[1][0] + 2_000
+        # the scene covers only the western 60 % of the AOI width (about 5 km of 8.5 km)
+        transform = from_origin(x0, y0, 10.0, 10.0)
+        h, w = 1000, 700
+        assets = {
+            b: _write_band(
+                tmp_path / f"{i}_{b}.tif",
+                np.full((h, w), 2000, dtype=np.uint16),
+                f"EPSG:{epsg}",
+                transform,
+                nodata=0,
+            )
+            for b in S2_BANDS
+        }
+        assets["SCL"] = _write_band(
+            tmp_path / f"{i}_SCL.tif",
+            np.full((h // 2, w // 2), 4, dtype=np.uint8),
+            f"EPSG:{epsg}",
+            from_origin(x0, y0, 20.0, 20.0),
+            nodata=0,
+        )
+        scene = SceneMetadata(f"s{i}", "sentinel-2", "", bbox, 0.0, assets)
+        out.append(download_scene_crop(scene, grid, tmp_path / "crops"))
+    for p in out:
+        with rasterio.open(p) as src:
+            assert src.crs == grid.crs and src.transform == grid.transform
+            assert (src.height, src.width) == (grid.height, grid.width)
+            cube = src.read()
+        assert np.allclose(cube[:, 10, 10], 0.2), "inside the scene: reflectance"
+        assert np.isnan(cube[:, 10, -10]).all(), "outside the scene: NaN"

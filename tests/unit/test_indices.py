@@ -96,3 +96,23 @@ def test_all_nan_composite_emits_no_warning(tmp_path):
         for method in ("median", "mean"):
             comp, _, _ = build_temporal_composite([p], method=method)
             assert np.isnan(comp).all()
+
+
+def test_composite_rejects_scenes_on_different_grids(tmp_path):
+    a = np.full((6, 4, 4), 0.2, dtype=np.float32)
+    p1 = write_composite(tmp_path / "s1.tif", a)
+    p2 = write_composite(tmp_path / "shifted.tif", a, origin_x=500_010.0)
+    with pytest.raises(ValueError, match="shifted.tif"):
+        build_temporal_composite([p1, p2])
+
+
+def test_composite_in_row_blocks_equals_whole_array_median(tmp_path):
+    rng = np.random.default_rng(1)
+    cubes = [rng.random((6, 23, 17), dtype=np.float32) for _ in range(3)]
+    cubes[1][:, 5:9, 2:6] = np.nan
+    cubes[2][:, 5:7, 2:4] = np.nan
+    paths = [write_composite(tmp_path / f"s{i}.tif", c) for i, c in enumerate(cubes)]
+    comp, profile, _ = build_temporal_composite(paths, block_rows=7)
+    expected = np.nanmedian(np.stack(cubes), axis=0)
+    np.testing.assert_allclose(comp, expected, atol=1e-7)
+    assert (profile["height"], profile["width"], profile["count"]) == (23, 17, 6)

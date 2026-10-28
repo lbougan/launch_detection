@@ -10,7 +10,7 @@ import rasterio
 import torch
 from torch.utils.data import Dataset
 
-from libs.features.indices import add_indices, normalize
+from libs.features.indices import add_indices, check_stats_channels, normalize
 from libs.features.stats import load_stats
 from libs.geo.bandspec import read_bandspec
 from libs.geo.labels import POSITIVE, read_label, weight_from_label
@@ -41,7 +41,8 @@ class LaunchSiteDataset(Dataset):
         with rasterio.open(chip["path"]) as src:
             image = src.read().astype(np.float32)
             spec = read_bandspec(src)
-        image, _ = add_indices(image, spec.names)
+        image, names = add_indices(image, spec.names)
+        check_stats_channels(names, self.stats)
         image = normalize(image, self.stats)
         image = np.nan_to_num(
             image, nan=0.0

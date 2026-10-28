@@ -56,14 +56,16 @@ def scanned_area_km2(composite_paths: list[Path]) -> float:
 def evaluate_composites(
     predictor: Predictor,
     composite_paths: list[Path],
-    stats_path: Path,
+    stats: dict | str | Path,
     sites: list[dict],
     out_dir: Path,
     split: str,
     checkpoint: str = "",
     threshold: float = 0.5,
 ) -> EvalResult:
-    stats = load_stats(stats_path)
+    """`stats` is the stats dict or a path to the stats JSON."""
+    if not isinstance(stats, dict):
+        stats = load_stats(Path(stats))
     preds: list[dict] = []
     for comp in composite_paths:
         prob = run_sliding_window(comp, out_dir / f"{Path(comp).stem}_prob.tif", predictor, stats)
@@ -114,12 +116,15 @@ def update_readme(readme: Path, table: str, checkpoint: str, commit: str) -> Non
 def build_parser():
     import argparse
 
-    from libs.config import default_stats_path
-
     ap = argparse.ArgumentParser(description="Evaluate a checkpoint on held-out sites")
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--manifest", default="data/manifests/chip_manifest.json")
-    ap.add_argument("--stats", default=str(default_stats_path()))
+    ap.add_argument(
+        "--stats",
+        default=None,
+        help="stats JSON; default: the checkpoint's own (checked against this file if given)",
+    )
+    ap.add_argument("--device", default="cpu", help="torch device, e.g. cuda or cuda:1")
     ap.add_argument("--sites", default="data/manifests/known_sites.json")
     ap.add_argument("--splits", default="data/manifests/splits.json")
     ap.add_argument("--composites-dir", default="data/composites")
@@ -132,6 +137,8 @@ def build_parser():
 def main() -> None:
     import subprocess
 
+    from libs.config import default_stats_path
+    from libs.features.stats import resolve_stats
     from libs.geo.chips import load_known_sites
     from libs.inference.predictors import LocalTorchPredictor
 
@@ -141,7 +148,11 @@ def main() -> None:
     sites = load_known_sites(Path(args.sites))
     splits = json.loads(Path(args.splits).read_text())
     manifest = json.loads(Path(args.manifest).read_text())
-    predictor = LocalTorchPredictor.from_checkpoint(args.checkpoint)
+    predictor = LocalTorchPredictor.from_checkpoint(args.checkpoint, device=args.device)
+    embedded = getattr(predictor, "stats", None)
+    if embedded is None and args.stats is None:
+        args.stats = str(default_stats_path())  # checkpoints from before stats were embedded
+    stats = resolve_stats(embedded, args.stats)
     results = []
     for split in args.split or ["val", "test"]:
         names = set(splits[split])
@@ -152,7 +163,7 @@ def main() -> None:
             evaluate_composites(
                 predictor,
                 comps,
-                Path(args.stats),
+                stats,
                 split_sites,
                 Path(args.out_dir) / split,
                 split,

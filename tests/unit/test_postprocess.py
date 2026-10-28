@@ -87,3 +87,26 @@ def test_extracted_polygon_is_lonlat_and_matches_the_centroid(tmp_path):
     assert maxx - minx < 0.01, "a 100 m blob spans well under 0.01 deg"
     assert d.area_km2 == 0.01, "area comes from projected pixels, not degrees"
     assert 0.7 < d.compactness < 0.8, "square Polsby-Popper (pi/4) on the projected polygon"
+
+
+def test_each_component_keeps_its_own_probability_and_area(tmp_path):
+    prob = np.zeros((64, 64), dtype=np.float32)
+    prob[5:15, 5:15] = 0.9
+    prob[40:60, 40:50] = 0.6
+    prob[30, 30] = 0.99  # 1 px: below min_area
+    path = tmp_path / "two.tif"
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=64,
+        height=64,
+        count=1,
+        dtype="float32",
+        crs="EPSG:32633",
+        transform=from_origin(500_000, 4_000_000, 10, 10),
+    ) as dst:
+        dst.write(prob, 1)
+    dets = threshold_and_extract(path, threshold=0.5, min_area_px=10)
+    assert [round(d.prob, 6) for d in dets] == [0.9, 0.6]
+    assert [d.evidence["area_px"] for d in dets] == [100, 200]

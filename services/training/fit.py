@@ -69,6 +69,7 @@ def fit_with_trainer(cfg: FitConfig):
     from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
     from torch.utils.data import DataLoader
 
+    from libs.features.stats import load_stats
     from services.training.dataset import LaunchSiteDataset, collate
     from services.training.lightning_module import LaunchSiteSegModule
 
@@ -104,6 +105,7 @@ def fit_with_trainer(cfg: FitConfig):
         in_channels=10,
         lr=cfg.lr,
         stats_path=cfg.stats_path,
+        stats=load_stats(Path(cfg.stats_path)),  # travels with the checkpoint
         known_sites_path=cfg.known_sites_path,
         splits_path=cfg.splits_path,
         val_composites=list(cfg.val_composites),

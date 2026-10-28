@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import logging
 import warnings
+from contextlib import ExitStack
 from pathlib import Path
 
 import numpy as np
 import rasterio
+from rasterio.windows import Window
 
 from libs.geo.bandspec import BandSpec, read_bandspec
 
@@ -62,33 +64,62 @@ def add_indices(stack: np.ndarray, names: tuple[str, ...]) -> tuple[np.ndarray, 
     return np.concatenate([b, extra], axis=0), names + INDEX_NAMES
 
 
+COMPOSITE_BLOCK_ROWS = 512  # rows per block: peak RAM is one block x scenes x bands
+
+
+def _grid_of(src) -> tuple:
+    return (src.crs, src.transform, src.width, src.height, src.count)
+
+
 def build_temporal_composite(
-    scene_paths: list[Path], method: str = "median"
+    scene_paths: list[Path], method: str = "median", block_rows: int = COMPOSITE_BLOCK_ROWS
 ) -> tuple[np.ndarray, dict, BandSpec]:
-    """NaN-aware pixel-wise median (or mean) of co-registered reflectance scenes.
+    """NaN-aware pixel-wise median (or mean) of reflectance scenes on one identical grid.
 
     Cloud-masked pixels are NaN in the inputs (see libs.geo.masks) and are therefore ignored;
-    a pixel that is cloudy in every scene stays NaN. Returns (composite, profile, bandspec).
+    a pixel that is cloudy in every scene stays NaN. Every scene must share CRS, transform and
+    shape (ingest warps them onto one AOI grid); the reduction runs in blocks of `block_rows`
+    rows. Returns (composite, profile, bandspec).
     """
     if not scene_paths:
         raise ValueError("No scenes provided for compositing")
-    arrays, profile, spec = [], None, None
-    for p in scene_paths:
-        with rasterio.open(p) as src:
-            arrays.append(src.read().astype(np.float32))
-            if profile is None:
-                profile = src.profile.copy()
-                spec = read_bandspec(src)
-    cube = np.stack(arrays, axis=0)
     if method not in ("median", "mean"):
         raise ValueError(f"Unknown method: {method}")
+    with rasterio.open(scene_paths[0]) as src:
+        profile = src.profile.copy()
+        spec = read_bandspec(src)
+        ref = _grid_of(src)
+    for p in scene_paths[1:]:
+        with rasterio.open(p) as src:
+            if _grid_of(src) != ref:
+                raise ValueError(
+                    f"{p} is not on the grid of {scene_paths[0]}: "
+                    f"{_grid_of(src)} != {ref} (crs, transform, width, height, bands)"
+                )
+    _, _, width, height, count = ref
     reducer = np.nanmedian if method == "median" else np.nanmean
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message="All-NaN slice", category=RuntimeWarning)
-        warnings.filterwarnings("ignore", message="Mean of empty slice", category=RuntimeWarning)
-        composite = reducer(cube, axis=0)
-    profile.update(dtype="float32", nodata=float("nan"), count=composite.shape[0])
-    return composite.astype(np.float32), profile, spec
+    composite = np.empty((count, height, width), dtype=np.float32)
+    with ExitStack() as stack:
+        sources = [stack.enter_context(rasterio.open(p)) for p in scene_paths]
+        for r0 in range(0, height, block_rows):
+            window = Window(0, r0, width, min(block_rows, height - r0))
+            block = np.stack([s.read(window=window).astype(np.float32) for s in sources])
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message="All-NaN slice", category=RuntimeWarning)
+                warnings.filterwarnings(
+                    "ignore", message="Mean of empty slice", category=RuntimeWarning
+                )
+                composite[:, r0 : r0 + window.height] = reducer(block, axis=0)
+    profile.update(dtype="float32", nodata=float("nan"), count=count)
+    return composite, profile, spec
+
+
+def check_stats_channels(names: tuple[str, ...], stats: dict) -> None:
+    """Raise unless `names` (bands + indices, in order) equal the channels the stats describe."""
+    if tuple(names) != tuple(stats["channels"]):
+        raise ValueError(
+            f"input channels {list(names)} do not match the stats channels {stats['channels']}"
+        )
 
 
 def normalize(array: np.ndarray, stats: dict) -> np.ndarray:

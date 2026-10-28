@@ -1,10 +1,11 @@
 """Site-held-out train/val/test assignment for chips (decision 2).
 
-A chip belongs to the split of the nearest known site if that site is within
-`exclusion_km`; otherwise it is background and goes to train. So no training chip lies
-within `exclusion_km` of a validation or test site. This holds when every held-out site
-is more than 2 x exclusion_km from every training site; `tests/unit/test_manifests.py`
-enforces it.
+Every chip of a held-out (val/test) AOI belongs to that AOI's split, however far it is from
+the site. Other chips belong to the split of the nearest known site if that site is within
+`exclusion_km`; otherwise they are background and go to train (background chips of training
+AOIs train). So no training chip lies within `exclusion_km` of a validation or test site.
+This holds when every held-out site is more than 2 x exclusion_km from every training site;
+`tests/unit/test_manifests.py` enforces it.
 """
 
 from __future__ import annotations
@@ -39,15 +40,23 @@ def assign_splits(
     sites: list[dict],
     splits: dict[str, list[str]],
     exclusion_km: float = 20.0,
+    aois: list[dict] | None = None,
 ) -> list[dict]:
     """Return new chip dicts with a 'split' key; inputs are not mutated.
 
-    Distances use each chip's `bbox_4326` (lon/lat, written by `chip_raster`), not `bbox`,
-    which is in the raster CRS.
+    With `aois` (the AOI config entries, `name` and `bbox`), a chip whose `aoi` names a val/test
+    AOI takes that split. Distances use each chip's `bbox_4326` (lon/lat, written by
+    `chip_raster`), not `bbox`, which is in the raster CRS.
     """
     site_split = _site_split_map(sites, splits)
+    held_out = {
+        a["name"]: s for a in aois or [] if (s := aoi_split(a, sites, splits)) in ("val", "test")
+    }
     out = []
     for chip in chips:
+        if chip.get("aoi") in held_out:
+            out.append({**chip, "split": held_out[chip["aoi"]]})
+            continue
         if "bbox_4326" not in chip:
             raise ValueError("chip manifest predates bbox_4326; re-run tile_composite")
         lon, lat = _centroid(chip["bbox_4326"])

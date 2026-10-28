@@ -10,6 +10,7 @@ import pytorch_lightning as pl
 import torch
 from torchmetrics import AUROC, F1Score, Precision, Recall
 
+from libs.config import default_stats_path
 from services.training.losses import CombinedLoss
 from services.training.model import build_deeplabv3plus, build_unet
 
@@ -34,7 +35,8 @@ class LaunchSiteSegModule(pl.LightningModule):
         focal_gamma: float = 2.0,
         dice_weight: float = 0.5,
         scheduler_patience: int = 5,
-        stats_path: str = "data/manifests/stats.json",
+        stats_path: str = str(default_stats_path()),
+        stats: dict | None = None,
         known_sites_path: str = "data/manifests/known_sites.json",
         splits_path: str = "data/manifests/splits.json",
         val_composites: list[str] | None = None,
@@ -102,15 +104,18 @@ class LaunchSiteSegModule(pl.LightningModule):
     def _log_site_metrics(self) -> None:
         """Log val/site_recall@10 every epoch (0.0 without val composites) for the checkpoint monitor.
 
-        Site-level evaluation is single-device: it runs and logs on global rank 0 only
-        (``rank_zero_only=True``, no ``sync_dist``). Failures propagate; a broken evaluation must
-        not silently log 0.0 into the checkpoint monitor.
+        Site-level evaluation runs on global rank 0 only; the result is broadcast so every rank
+        logs the same value (``sync_dist=False``) and the checkpoint monitor exists everywhere.
+        Failures propagate; a broken evaluation must not silently log 0.0 into the monitor.
         """
-        if self.trainer.sanity_checking or not self.trainer.is_global_zero:
+        if self.trainer.sanity_checking:
             return
-        recall, fp = self._site_metrics() if self.hparams.val_composites else (0.0, 0.0)
-        self.log("val/site_recall@10", recall, prog_bar=True, rank_zero_only=True, sync_dist=False)
-        self.log("val/fp_per_1000km2", fp, rank_zero_only=True, sync_dist=False)
+        metrics = (0.0, 0.0)
+        if self.hparams.val_composites and self.trainer.is_global_zero:
+            metrics = self._site_metrics()
+        recall, fp = self.trainer.strategy.broadcast(metrics, src=0)
+        self.log("val/site_recall@10", recall, prog_bar=True, sync_dist=False)
+        self.log("val/fp_per_1000km2", fp, sync_dist=False)
 
     def _site_metrics(self) -> tuple[float, float]:
         import json
@@ -129,11 +134,10 @@ class LaunchSiteSegModule(pl.LightningModule):
         sites = [
             s for s in load_known_sites(Path(self.hparams.known_sites_path)) if s["name"] in names
         ]
+        stats = self.hparams.get("stats") or Path(self.hparams.stats_path)
         predictor = LocalTorchPredictor(self, device=str(self.device))
         with tempfile.TemporaryDirectory() as tmp:
-            res = evaluate_composites(
-                predictor, comps, Path(self.hparams.stats_path), sites, Path(tmp), "val"
-            )
+            res = evaluate_composites(predictor, comps, stats, sites, Path(tmp), "val")
         return res.recall_at_10, res.fp_per_1000km2
 
     def configure_optimizers(self) -> dict:

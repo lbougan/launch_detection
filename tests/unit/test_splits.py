@@ -70,3 +70,22 @@ def test_manifest_without_bbox_4326_is_rejected():
     old = {"tile_id": "t", "bbox": [500_000.0, 4_000_000.0, 501_280.0, 4_001_280.0]}
     with pytest.raises(ValueError, match="predates bbox_4326"):
         assign_splits([old], SITES, SPLITS)
+
+
+AOIS = [
+    {"name": "a_aoi", "bbox": [-0.3, -0.3, 0.3, 0.3]},
+    {"name": "b_aoi", "bbox": [0.7, -0.3, 1.3, 0.3]},
+]
+
+
+def test_every_chip_of_a_held_out_aoi_takes_its_split():
+    corner = {**_chip(1.0, 0.225, "b_corner"), "aoi": "b_aoi"}  # ~25 km north of B
+    out = assign_splits([corner], SITES, SPLITS, exclusion_km=20.0, aois=AOIS)
+    assert out[0]["split"] == "test", "beyond the exclusion radius but inside a test AOI"
+
+
+def test_background_chips_of_training_aois_and_chips_without_aoi_keep_the_distance_rule():
+    a_corner = {**_chip(0.0, 0.225, "a_corner"), "aoi": "a_aoi"}
+    no_aoi = _chip(1.0, 0.225, "b_corner_no_aoi")
+    out = assign_splits([a_corner, no_aoi], SITES, SPLITS, exclusion_km=20.0, aois=AOIS)
+    assert [c["split"] for c in out] == ["train", "train"]

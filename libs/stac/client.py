@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -15,8 +16,9 @@ import pystac_client
 import rasterio
 from rasterio.crs import CRS
 from rasterio.enums import Resampling
+from rasterio.transform import Affine, from_origin
+from rasterio.vrt import WarpedVRT
 from rasterio.warp import transform_bounds
-from rasterio.windows import from_bounds
 
 from libs.geo.bandspec import S2_BAND_NAMES, TAG_KEY, BandSpec, write_bandspec
 from libs.geo.masks import apply_cloud_mask
@@ -39,6 +41,46 @@ DEFAULT_SCALE_OFFSET = (1e-4, 0.0)
 BASELINE_OFFSET_FROM = 4.0
 BASELINE_OFFSET = -0.1
 __all__ = ["S2_BAND_NAMES"]  # re-exported from libs.geo.bandspec
+
+
+TARGET_RES_M = 10.0
+
+
+@dataclass(frozen=True)
+class Grid:
+    """The one target grid of an AOI: every scene crop is warped onto it."""
+
+    crs: CRS
+    transform: Affine
+    width: int
+    height: int
+
+
+def utm_crs(lon: float, lat: float) -> CRS:
+    """WGS84 / UTM zone of (lon, lat): EPSG 326xx north, 327xx south."""
+    zone = min(max(int((lon + 180.0) // 6.0) + 1, 1), 60)
+    return CRS.from_user_input(f"EPSG:{(32600 if lat >= 0 else 32700) + zone}")
+
+
+def aoi_target_grid(bbox: list[float], res: float = TARGET_RES_M) -> Grid:
+    """UTM grid (zone of the AOI centre) covering the lon/lat bbox, snapped to `res` metres."""
+    west, south, east, north = bbox
+    crs = utm_crs((west + east) / 2.0, (south + north) / 2.0)
+    left, bottom, right, top = _bbox_to_native(bbox, crs)
+    x0, y0 = math.floor(left / res) * res, math.ceil(top / res) * res
+    width = math.ceil((right - x0) / res)
+    height = math.ceil((y0 - bottom) / res)
+    return Grid(crs=crs, transform=from_origin(x0, y0, res, res), width=width, height=height)
+
+
+def crop_matches_grid(path: Path, grid: Grid) -> bool:
+    with rasterio.open(path) as src:
+        return (src.crs, src.transform, src.width, src.height) == (
+            grid.crs,
+            grid.transform,
+            grid.width,
+            grid.height,
+        )
 
 
 @dataclass
@@ -140,25 +182,21 @@ def _bbox_to_native(
     return transform_bounds("EPSG:4326", src_crs, *target_bbox, densify_pts=21)
 
 
-def _read_band(
-    url: str,
-    target_bbox: list[float],
-    out_shape: tuple[int, int],
-    resampling: Resampling = Resampling.bilinear,
-) -> np.ndarray:
-    """Read a single band crop from a remote COG, computing its own window."""
-    with rasterio.open(url) as src:
-        west, south, east, north = _bbox_to_native(target_bbox, src.crs)
-        rb = src.bounds
-        west, south = max(west, rb.left), max(south, rb.bottom)
-        east, north = min(east, rb.right), min(north, rb.top)
-        if west >= east or south >= north:
-            raise ValueError("No spatial overlap")
-        window = from_bounds(west, south, east, north, transform=src.transform)
-        window = window.round_offsets().round_lengths()
-        if window.width < 1 or window.height < 1:
-            raise ValueError("Zero-pixel window")
-        return src.read(1, window=window, out_shape=out_shape, resampling=resampling)
+def _read_band(url: str, grid: Grid, resampling: Resampling = Resampling.bilinear) -> np.ndarray:
+    """Warp one band of a remote COG onto `grid`; pixels outside the scene come out as 0
+    (the L2A nodata value, SCL class 0), which the cloud mask turns into NaN."""
+    with (
+        rasterio.open(url) as src,
+        WarpedVRT(
+            src,
+            crs=grid.crs,
+            transform=grid.transform,
+            width=grid.width,
+            height=grid.height,
+            resampling=resampling,
+        ) as vrt,
+    ):
+        return vrt.read(1)
 
 
 def assemble_crop(
@@ -183,67 +221,46 @@ def assemble_crop(
 
 def download_scene_crop(
     scene: SceneMetadata,
-    target_bbox: list[float],
+    grid: Grid,
     output_dir: Path,
     max_workers: int = 6,
 ) -> Path:
-    """Download a cropped region of a scene's bands and stack into a single GeoTIFF.
+    """Warp a scene's bands and SCL onto the AOI grid and write one float32 reflectance GeoTIFF.
 
-    Band reads are parallelized across threads for much faster I/O.
-    Each band computes its own window from the bbox so mixed-resolution
-    bands (10m vs 20m) are handled correctly and resampled to a common grid.
+    Band reads run in parallel threads. Every crop of an AOI lands on the identical grid, whatever
+    the scene's MGRS tile or UTM zone (bilinear for reflectance, nearest for the SCL).
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / f"{scene.scene_id}.tif"
 
     if out_path.exists():
-        if is_pipeline_crop(out_path):
+        if is_pipeline_crop(out_path) and crop_matches_grid(out_path, grid):
             logger.debug("Scene %s already downloaded at %s", scene.scene_id, out_path)
             return out_path
-        logger.warning("Re-downloading %s: %s is a legacy untagged crop", scene.scene_id, out_path)
+        logger.warning(
+            "Re-downloading %s: %s is legacy or on another grid", scene.scene_id, out_path
+        )
 
     missing = [k for k in S2_BANDS if k not in scene.assets]
     if missing or "SCL" not in scene.assets:
         raise ValueError(f"Scene {scene.scene_id} lacks bands {missing} or SCL")
-    urls = [(key, scene.assets[key]) for key in S2_BANDS]
-
-    # Use the first (10m) band to establish the output grid
-    first_url = urls[0][1]
-    with rasterio.open(first_url) as src:
-        src_crs = src.crs
-        west, south, east, north = _bbox_to_native(target_bbox, src_crs)
-        rb = src.bounds
-        west, south = max(west, rb.left), max(south, rb.bottom)
-        east, north = min(east, rb.right), min(north, rb.top)
-        window = from_bounds(west, south, east, north, transform=src.transform)
-        window = window.round_offsets().round_lengths()
-        ref_transform = rasterio.windows.transform(window, src.transform)
-        ref_shape = (int(window.height), int(window.width))
 
     profile = {
         "driver": "GTiff",
-        "height": ref_shape[0],
-        "width": ref_shape[1],
+        "height": grid.height,
+        "width": grid.width,
         "count": len(S2_BANDS),
         "dtype": "float32",
         "nodata": float("nan"),
-        "transform": ref_transform,
+        "transform": grid.transform,
         "compress": "deflate",
-        "crs": src_crs,
+        "crs": grid.crs,
     }
 
     arrays: dict[str, np.ndarray] = {}
-    with ThreadPoolExecutor(max_workers=min(max_workers, len(urls) + 1)) as pool:
-        futures = {pool.submit(_read_band, url, target_bbox, ref_shape): key for key, url in urls}
-        futures[
-            pool.submit(
-                _read_band,
-                scene.assets["SCL"],
-                target_bbox,
-                ref_shape,
-                Resampling.nearest,
-            )
-        ] = "SCL"
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(S2_BANDS) + 1)) as pool:
+        futures = {pool.submit(_read_band, scene.assets[key], grid): key for key in S2_BANDS}
+        futures[pool.submit(_read_band, scene.assets["SCL"], grid, Resampling.nearest)] = "SCL"
         for future in as_completed(futures):
             # A missing band or SCL makes the crop unusable: let the error propagate.
             arrays[futures[future]] = future.result()
@@ -261,14 +278,14 @@ def download_scene_crop(
 
 def _download_one_scene(
     scene: SceneMetadata,
-    target_bbox: list[float],
+    grid: Grid,
     output_dir: Path,
     idx: int,
     total: int,
 ) -> Path | None:
     t0 = time.time()
     try:
-        path = download_scene_crop(scene, target_bbox, output_dir)
+        path = download_scene_crop(scene, grid, output_dir)
         sz = path.stat().st_size / 1e6
         logger.info(
             "  [%d/%d] %s  %.1f MB  %.1fs",
@@ -292,14 +309,15 @@ def ingest_aoi(
     limit: int = 50,
     max_scene_workers: int = 4,
 ) -> list[Path]:
-    """Search Sentinel-2 L2A over the AOI and download cropped scenes concurrently."""
+    """Search Sentinel-2 L2A over the AOI and warp the scenes onto one AOI grid, concurrently."""
     output_dir = Path(output_dir)
     s2_dir = output_dir / "sentinel2"
+    grid = aoi_target_grid(bbox)
     scenes = search_sentinel2(bbox, date_range, max_cloud_cover, limit=limit)
     downloaded: list[Path] = []
     with ThreadPoolExecutor(max_workers=max_scene_workers) as pool:
         futures = {
-            pool.submit(_download_one_scene, scene, bbox, s2_dir, i, len(scenes)): scene
+            pool.submit(_download_one_scene, scene, grid, s2_dir, i, len(scenes)): scene
             for i, scene in enumerate(scenes, 1)
         }
         for future in as_completed(futures):

@@ -64,3 +64,23 @@ def save_stats(stats: dict, path: Path) -> None:
 
 def load_stats(path: Path) -> dict:
     return json.loads(Path(path).read_text())
+
+
+def resolve_stats(embedded: dict | None, stats_path: str | Path | None) -> dict:
+    """The stats to normalise with: the checkpoint's own, checked against a given file.
+
+    A checkpoint without stats (or a Triton model) needs `stats_path`.
+    """
+    if embedded is None:
+        if not stats_path:
+            raise ValueError("no normalisation stats: the checkpoint has none and no stats_path")
+        return load_stats(Path(stats_path))
+    if stats_path:
+        from_file = load_stats(Path(stats_path))
+        if from_file != embedded:
+            raise ValueError(
+                f"stats in {stats_path} differ from the stats embedded in the checkpoint; "
+                "drop the stats argument to use the checkpoint's, or pass the file it was "
+                "trained with"
+            )
+    return embedded

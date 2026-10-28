@@ -23,14 +23,15 @@ Until the GPU run is done this block holds the synthetic end-to-end result only:
 
 | synthetic, not real imagery | sites | scanned km² | recall@5 | recall@10 | FP / 1000 km² | detections | runtime |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| planted site, validation composite | 1 | 26.2 | 1.00 | 1.00 | 0.0 | 3 | 23 s (16 cores, CPU) |
+| planted site, validation composite | 1 | 26.2 | 1.00 | 1.00 | 0.0 | 1 | 23 s (16 cores, CPU) |
 
 Source: [`tests/integration/test_synthetic_pipeline.py`](tests/integration/test_synthetic_pipeline.py).
-Two synthetic 10-band composites, each with one planted bright square "site", are chipped,
+Two synthetic 6-band reflectance composites (10 channels after indices), each with one planted
+bright square "site", are chipped,
 labelled, split by site, normalised with stats from the training composite only, used to train a
 ResNet-18 UNet for two epochs on CPU, then scanned with the same sliding window and
-postprocessing that production uses. All three detections on the validation composite lie on the
-planted site. This proves that the stages fit together; it says nothing about detection skill on
+postprocessing that production uses. After deduplication 1 detection remains on the planted
+site; with a 2 km merge radius on a 5 km raster, FP = 0 here says little. This proves that the stages fit together; it says nothing about detection skill on
 real imagery.
 
 ## What changed in v0.2 and why
@@ -64,15 +65,20 @@ STAC API: blue, green, red, NIR (10 m) and SWIR 1.6/2.2 µm (20 m, resampled to 
 
 Processing chain:
 
-1. **Ingest.** STAC search per AOI and date range; each scene is cropped to the AOI and its SCL
-   band is read alongside. Pixels outside the clear classes (4 to 7) become NaN at ingest.
+1. **Ingest.** STAC search per AOI and date range. Each AOI gets one target grid (10 m, UTM zone
+   of its centre), and every band and the SCL of every scene are warped onto it, so scenes from
+   neighbouring MGRS tiles or UTM zones line up pixel for pixel. Pixels outside the clear classes
+   (4 to 7), or outside the scene, become NaN at ingest.
    Digital numbers become reflectance with `scale_offset_for`: DN × 1e-4, with an offset of −0.1
    for processing baseline 04.00 and later (Planetary Computer items carry no `raster:bands`, so
    the baseline decides).
-2. **Composite.** Per-pixel NaN-median over the scenes of an AOI. Every composite carries a
+2. **Composite.** Per-pixel NaN-median over the scenes of an AOI, in blocks of 512 rows; scenes
+   on different grids are rejected. Every composite carries a
    `BANDSPEC` tag with the band names in order; readers refuse untagged composites.
 3. **Normalise.** `data/manifests/channel_stats.json` holds per-channel p2/p98 and the mean and
-   standard deviation after clipping, computed on training-AOI composites only. One function,
+   standard deviation after clipping, computed on training-AOI composites only; training embeds
+   them in the checkpoint, and inference and evaluation use the checkpoint's copy (a stats file
+   given as well must match it). One function,
    `normalize(array, stats)`, clips each channel to its p2/p98 range and standardises it. Four
    spectral indices (NDVI, NDWI, NDBI, BSI) are computed from reflectance first, giving 10 input
    channels.
@@ -83,8 +89,9 @@ Processing chain:
    azimuthal equidistant projection.
 5. **Splits.** Defined by site in [`data/manifests/splits.json`](data/manifests/splits.json).
    Test: Satish Dhawan, Tanegashima, Guiana. Validation: Xichang, Plesetsk, Sohae. The remaining
-   12 sites are for training. A chip within 20 km of a site follows that site's split; each AOI
-   belongs to one split. The 17 AOIs are in [`data/manifests/aoi_config.json`](data/manifests/aoi_config.json).
+   12 sites are for training. Each AOI belongs to one split (that of the site nearest its
+   centre); every chip of a held-out AOI belongs to that split; background chips of training AOIs
+   train. A chip within 20 km of a site follows that site's split. The 17 AOIs are in [`data/manifests/aoi_config.json`](data/manifests/aoi_config.json).
 
 See the [dataset card](docs/dataset-card.md) for details.
 
@@ -128,8 +135,8 @@ Results go to `out/eval/{val,test}.json`; `--update-readme` rewrites the Results
 ## Inference and serving
 
 There is one sliding window, `libs.inference.sliding_window.run_sliding_window`: 256 px windows
-with 64 px overlap, averaged in an `Accumulator`. `memmap=True` keeps the full-size sum and count
-maps on disk, so memory stays at one batch of tiles for any AOI size. Pixels whose composite has
+with 64 px overlap, averaged in an `Accumulator`. With `memmap=True` the accumulation maps live on
+disk and the raster is finalised and written in row strips. Pixels whose composite has
 no data (NaN) stay NaN in the probability raster. The model sits behind a
 `Predictor` protocol: `LocalTorchPredictor` (in-process PyTorch, any device) or `TritonPredictor`
 (NVIDIA Triton over gRPC). Postprocessing thresholds the probability raster, polygonises it,
@@ -200,10 +207,15 @@ docker compose -f infra/docker-compose.yml up -d postgres
 uv run pytest -m api -q       # API tests on PostGIS, in their own <db>_test database
 ```
 
-105 tests run by default and 8 API tests run with `-m api`. Coverage is gated at 80 % (89.3 %
-measured) over `libs` and `services`; the API is measured separately by the API job (89 %). CI
+136 tests run by default and 10 API tests run with `-m api`. Coverage is gated at 80 % (93.9 %
+measured) over `libs` and `services`, except for files omitted from that gate in
+`pyproject.toml`: `services/web/*` (JavaScript), `services/pipeline/flows.py` (Prefect wiring),
+`services/serving/export_model.py` (ONNX export), `libs/stac/client.py` (network I/O; its pure
+helpers are unit-tested) and `services/api/*` (needs PostGIS). The API is gated at 80 % by the API
+job instead (89.6 % measured, [`.coveragerc.api`](.coveragerc.api)). CI
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) has two jobs: `lint-and-unit` (ruff,
-pytest with the coverage gate) and `api` (pytest `-m api` against a PostGIS service container).
+pytest with the coverage gate) and `api` (pytest `-m api` against a PostGIS service container,
+with its own coverage gate).
 
 [`scripts/gpu_day.sh`](scripts/gpu_day.sh) is the runbook for the first real-data run: ingest,
 train, evaluate (which fills the Results block) and export.
@@ -224,8 +236,12 @@ instances are in [docs/hardware.md](docs/hardware.md).
   the model can only respond to compound-scale structure.
 - **No real-data numbers yet.** The synthetic test proves plumbing, not detection skill. Real
   results arrive with the GPU run.
-- **Triton is tested with a stub only.** The Triton predictor and client are covered by unit
-  tests against a fake client, not against a running server.
+- **Triton is tested with stubs only.** `TritonPredictor` and `TritonSegClient` are unit-tested
+  against stubs; neither has run against a live server here.
 - **Sentinel-1 is not included.** Radar would help under persistent cloud (Guiana, Xichang).
-- **Pipeline import weight.** `services/pipeline/tasks.py` still imports rasterio at module
-  level through `libs.geo`.
+- **Pipeline import weight.** `services/pipeline/flows.py` imports rasterio at module level
+  through `libs.geo.chips` (torch, Lightning and SQLAlchemy stay lazy).
+- **RAM for compositing.** Composites are float32: a 20-scene large AOI needs roughly 2× the
+  v0.1 RAM figure; compositing runs in row blocks so peak RAM is one block × scenes.
+- **Dedupe chains.** DBSCAN with `min_samples=1` chains nearby candidates: a line of detections
+  each within 2 km of the next collapses into one, however long the line.

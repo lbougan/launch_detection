@@ -12,7 +12,9 @@ import rasterio
 import shapely
 from pyproj import Transformer
 from rasterio.features import shapes as rasterio_shapes
+from rasterio.transform import Affine
 from rasterio.warp import transform as warp_transform
+from scipy.ndimage import find_objects
 from scipy.ndimage import label as scipy_label
 from shapely.geometry import MultiPolygon, Polygon, shape
 from shapely.ops import unary_union
@@ -69,18 +71,24 @@ def threshold_and_extract(
     logger.info("Found %d connected components at threshold=%.2f", n_components, threshold)
 
     detections = []
-    for component_id in range(1, n_components + 1):
-        component_mask = (labeled == component_id).astype(np.uint8)
-        area_px = component_mask.sum()
+    # find_objects gives each component's bounding slices, so the per-component work touches
+    # only that box instead of the full raster.
+    for component_id, slices in enumerate(find_objects(labeled), start=1):
+        if slices is None:
+            continue
+        in_component = labeled[slices] == component_id
+        area_px = int(in_component.sum())
 
         if area_px < min_area_px:
             continue
 
-        component_probs = prob[labeled == component_id]
-        mean_prob = float(np.mean(component_probs))
+        mean_prob = float(np.mean(prob[slices][in_component]))
+        rows, cols = slices
+        box_transform = transform * Affine.translation(cols.start, rows.start)
 
         polygons = []
-        for geom, value in rasterio_shapes(component_mask, transform=transform):
+        component_mask = in_component.astype(np.uint8)
+        for geom, value in rasterio_shapes(component_mask, transform=box_transform):
             if value == 1:
                 polygons.append(shape(geom))
 

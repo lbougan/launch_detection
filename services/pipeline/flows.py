@@ -97,6 +97,7 @@ def ingest_and_preprocess_flow(
         chip_manifest=all_chips,
         known_sites_path=known_sites_path,
         splits_path=splits_path,
+        aois=aoi_config["aois"],
     )
     logger.info("Chips per split: %s", count_by_split(split_chips))
 

@@ -57,6 +57,8 @@ four and adds 13 compact AOIs (400 to 1,100 km² each) so that every one of the 
 imagery: 17 AOIs, about 45,000 km² in total. The compact AOIs add roughly a third to the area, so
 scale the disk figures accordingly, or cap downloads with
 `python -m services.pipeline.flows ingest --max-scenes 20` (what `scripts/gpu_day.sh` does).
+v0.2 scene crops are float32 reflectance rather than uint16, so the raw-download disk figures
+above roughly double.
 
 ## Outcome of issue #1 (CPU-only runs are too slow)
 

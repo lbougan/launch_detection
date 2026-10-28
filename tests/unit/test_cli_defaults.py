@@ -17,7 +17,8 @@ def test_all_stats_defaults_equal_default_stats_path():
     expected = str(default_stats_path())
     stats_opt = next(p for p in train.params if p.name == "stats")
     assert stats_opt.default == expected
-    assert evaluate_parser().parse_args(["--checkpoint", "c"]).stats == expected
+    # evaluate: None = the checkpoint's embedded stats (default_stats_path for old checkpoints)
+    assert evaluate_parser().parse_args(["--checkpoint", "c"]).stats is None
     assert export_parser().parse_args(["--checkpoint", "c"]).stats == expected
     assert flows.build_parser().parse_args(["train"]).stats == expected
     assert flows.build_parser().parse_args(["detect"]).stats == expected

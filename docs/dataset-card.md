@@ -51,8 +51,9 @@ By site, defined in `data/manifests/splits.json`:
   Station
 - **Train**: the other 12 sites
 
-A chip within 20 km of a site takes that site's split; each AOI belongs to one split (the split
-of the site nearest its centre).
+Each AOI belongs to one split (the split of the site nearest its centre); every chip of a
+held-out AOI belongs to that split; background chips of training AOIs train. A chip within 20 km
+of a site takes that site's split.
 
 ## Known Issues
 

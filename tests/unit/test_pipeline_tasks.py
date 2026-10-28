@@ -84,6 +84,29 @@ def test_run_inference_local_writes_prob_and_closes(tmp_path: Path, composite, m
     assert predictor.closed
 
 
+def test_run_inference_uses_checkpoint_stats_and_rejects_a_different_file(
+    tmp_path: Path, composite, monkeypatch
+):
+    from libs.features.stats import compute_channel_stats, save_stats
+    from libs.inference.predictors import LocalTorchPredictor
+
+    stats = compute_channel_stats([composite[0]], sample_px=2000)
+    predictor = ClosablePredictor(0.25)
+    predictor.stats = stats
+    monkeypatch.setattr(LocalTorchPredictor, "from_checkpoint", lambda *a, **k: predictor)
+    out = tasks.run_inference_task.fn(
+        str(composite[0]), str(tmp_path / "prob.tif"), "", "local", checkpoint_path="x.ckpt"
+    )
+    assert Path(out).exists(), "no stats file needed when the checkpoint carries stats"
+    other = tmp_path / "other.json"
+    save_stats({**stats, "mean": [m + 1 for m in stats["mean"]]}, other)
+    with pytest.raises(ValueError, match="checkpoint"):
+        tasks.run_inference_task.fn(
+            str(composite[0]), str(tmp_path / "p2.tif"), str(other), "local", checkpoint_path="x"
+        )
+    assert predictor.closed
+
+
 def test_run_inference_triton_uses_env_url(tmp_path: Path, composite, monkeypatch):
     from libs.inference.predictors import TritonPredictor
 

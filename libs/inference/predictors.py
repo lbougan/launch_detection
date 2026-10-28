@@ -27,12 +27,13 @@ class FakePredictor:
 class LocalTorchPredictor:
     """In-process PyTorch model (a LaunchSiteSegModule or any nn.Module returning logits)."""
 
-    def __init__(self, model, device: str = "cpu"):
+    def __init__(self, model, device: str = "cpu", stats: dict | None = None):
         import torch
 
         self._torch = torch
         self.model = model.to(device).eval()
         self.device = device
+        self.stats = stats  # normalisation stats the model was trained with, if known
 
     @classmethod
     def from_checkpoint(
@@ -41,7 +42,7 @@ class LocalTorchPredictor:
         from services.training.lightning_module import LaunchSiteSegModule
 
         module = LaunchSiteSegModule.load_from_checkpoint(str(checkpoint_path), map_location=device)
-        return cls(module, device=device)
+        return cls(module, device=device, stats=module.hparams.get("stats"))
 
     def predict(self, batch: np.ndarray) -> np.ndarray:
         torch = self._torch

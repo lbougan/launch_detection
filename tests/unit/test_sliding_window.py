@@ -116,3 +116,16 @@ def _stats_for(path):
     from libs.features.stats import compute_channel_stats
 
     return compute_channel_stats([path], sample_px=2000)
+
+
+def test_read_tile_rejects_stats_for_other_channels(tmp_path):
+    from libs.inference.sliding_window import read_tile
+
+    src_path = write_composite(tmp_path / "c.tif", make_reflectance_cube(64, 64, 32, 32, 8))
+    stats = _stats_for(src_path)
+    swapped = {**stats, "channels": list(reversed(stats["channels"]))}
+    with rasterio.open(src_path) as src:
+        names = tuple(stats["channels"][:6])
+        read_tile(src, 0, 0, 64, names, stats)  # matching order is fine
+        with pytest.raises(ValueError, match="channels"):
+            read_tile(src, 0, 0, 64, names, swapped)

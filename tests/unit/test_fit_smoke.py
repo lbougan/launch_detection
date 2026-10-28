@@ -50,3 +50,12 @@ def test_fit_runs_one_epoch_on_cpu_and_logs_site_recall(small_composite, tmp_pat
     assert best and Path(best).exists()
     assert re.search(r"launchsite-00-\d\.\d{3}\.ckpt$", best)
     assert "val/site_recall@10" in trainer.callback_metrics
+    import torch
+
+    hparams = torch.load(best, map_location="cpu", weights_only=False)["hyper_parameters"]
+    assert hparams["stats"] == json.loads(stats.read_text()), "stats travel with the checkpoint"
+    assert hparams["stats_path"] == str(stats)
+
+    from libs.inference.predictors import LocalTorchPredictor
+
+    assert LocalTorchPredictor.from_checkpoint(best).stats == hparams["stats"]
