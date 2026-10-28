@@ -13,6 +13,7 @@ from libs.config import settings
 from services.pipeline.tasks import (
     build_composite_task,
     build_labels_task,
+    compute_stats_task,
     ingest_aoi_task,
     postprocess_task,
     run_inference_task,
@@ -43,6 +44,7 @@ def ingest_and_preprocess_flow(
 
     data_dir = Path(settings.data_dir)
     all_chips = []
+    composite_paths: list[str] = []
 
     for aoi in aoi_config["aois"]:
         aoi_name = aoi["name"]
@@ -67,6 +69,8 @@ def ingest_and_preprocess_flow(
             output_path=str(data_dir / "composites" / f"{aoi_name}_composite.tif"),
         )
 
+        composite_paths.append(composite_path)
+
         chips = tile_composite_task(
             composite_path=composite_path,
             output_dir=str(data_dir / "tiles" / aoi_name),
@@ -75,6 +79,12 @@ def ingest_and_preprocess_flow(
         for chip in chips:
             chip["aoi"] = aoi_name
         all_chips.extend(chips)
+
+    if composite_paths:
+        compute_stats_task(
+            composite_paths=composite_paths,
+            output_path=str(data_dir / "manifests" / "channel_stats.json"),
+        )
 
     labeled_chips = build_labels_task(
         chip_manifest=all_chips,

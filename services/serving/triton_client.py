@@ -11,6 +11,7 @@ import numpy as np
 import tritonclient.grpc as grpcclient
 
 from libs.features.indices import add_indices, normalize_percentile
+from libs.stac.client import S2_BAND_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +126,7 @@ def _read_and_preprocess_tile(
     data = src.read(window=window).astype(np.float32)
     data = normalize_percentile(data)
     if use_indices and data.shape[0] == 6:
-        data = add_indices(data)
+        data = add_indices(data, S2_BAND_NAMES)[0]
     return data
 
 

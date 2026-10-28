@@ -12,6 +12,7 @@ from torch.utils.data import Dataset
 
 from libs.features.indices import add_indices, normalize_percentile
 from libs.geo.tiling import build_weak_label_mask, load_known_sites
+from libs.stac.client import S2_BAND_NAMES
 
 
 class LaunchSiteDataset(Dataset):
@@ -48,7 +49,7 @@ class LaunchSiteDataset(Dataset):
         image = normalize_percentile(image)
 
         if self.use_indices and image.shape[0] == 6:
-            image = add_indices(image)
+            image = add_indices(image, S2_BAND_NAMES)[0]
 
         mask = build_weak_label_mask(
             bbox=chip["bbox"],

@@ -11,6 +11,7 @@ import rasterio
 from rasterio.windows import Window
 
 from libs.features.indices import add_indices, normalize_percentile
+from libs.stac.client import S2_BAND_NAMES
 from services.serving.triton_client import (
     DEFAULT_MODEL_NAME,
     DEFAULT_TRITON_URL,
@@ -140,7 +141,7 @@ def memory_optimized_inference(
                             data = src.read(window=window).astype(np.float32)
                             data = normalize_percentile(data)
                             if use_indices and data.shape[0] == 6:
-                                data = add_indices(data)
+                                data = add_indices(data, S2_BAND_NAMES)[0]
 
                             batch_images.append(data)
                             batch_coords.append((row, col))

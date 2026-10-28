@@ -18,7 +18,9 @@ from sqlalchemy import create_engine, text
 from torch.utils.data import DataLoader
 
 from libs.config import settings
-from libs.features.indices import build_temporal_composite, normalize_percentile
+from libs.features.indices import build_temporal_composite
+from libs.features.stats import compute_channel_stats, save_stats
+from libs.geo.bandspec import write_bandspec
 from libs.geo.postprocess import (
     deduplicate_detections,
     detections_to_geodataframe,
@@ -157,17 +159,26 @@ def build_composite_task(
     if not paths:
         raise ValueError("No scenes to composite")
 
-    composite, profile = build_temporal_composite(paths, method)
-    composite = normalize_percentile(composite)
+    composite, profile, spec = build_temporal_composite(paths, method)
 
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    profile.update(dtype="float32", compress="deflate")
+    profile.update(dtype="float32", nodata=float("nan"), compress="deflate")
     with rasterio.open(out, "w", **profile) as dst:
         dst.write(composite)
+        write_bandspec(dst, spec)
 
     logger.info("Built composite → %s", out)
     return str(out)
+
+
+@task(name="compute-stats")
+def compute_stats_task(composite_paths: list[str], output_path: str) -> str:
+    """Compute global per-channel normalisation stats over the given composites."""
+    stats = compute_channel_stats([Path(p) for p in composite_paths])
+    save_stats(stats, Path(output_path))
+    logger.info("Wrote channel stats (%d samples) -> %s", stats["n_samples"], output_path)
+    return output_path
 
 
 @task(name="tile-composite")

@@ -6,7 +6,7 @@ import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -14,7 +14,11 @@ import planetary_computer as pc
 import pystac_client
 import rasterio
 from pyproj import Transformer
+from rasterio.enums import Resampling
 from rasterio.windows import from_bounds
+
+from libs.geo.bandspec import BandSpec, write_bandspec
+from libs.geo.masks import apply_cloud_mask
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +33,10 @@ STAC_API_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
 SENTINEL2_COLLECTION = "sentinel-2-l2a"
 
 S2_BANDS = ["B02", "B03", "B04", "B08", "B11", "B12"]
-S2_BAND_NAMES = ["blue", "green", "red", "nir", "swir16", "swir22"]
+S2_BAND_NAMES = ("blue", "green", "red", "nir", "swir16", "swir22")
+# L2A digital numbers per reflectance unit; the per-band scale/offset from STAC take precedence
+S2_REFLECTANCE_SCALE = 10_000.0
+DEFAULT_SCALE_OFFSET = (1e-4, 0.0)
 
 
 @dataclass
@@ -40,6 +47,7 @@ class SceneMetadata:
     bbox: list[float]
     cloud_cover: float | None
     assets: dict[str, str]
+    scales: dict[str, tuple[float, float]] = field(default_factory=dict)
 
 
 def get_stac_client() -> pystac_client.Client:
@@ -71,9 +79,15 @@ def search_sentinel2(
     results = []
     for item in search.items():
         assets = {}
+        scales: dict[str, tuple[float, float]] = {}
         for band in S2_BANDS:
             if band in item.assets:
                 assets[band] = item.assets[band].href
+                rb = (item.assets[band].extra_fields.get("raster:bands") or [{}])[0]
+                scales[band] = (
+                    float(rb.get("scale", DEFAULT_SCALE_OFFSET[0])),
+                    float(rb.get("offset", DEFAULT_SCALE_OFFSET[1])),
+                )
         if item.assets.get("SCL"):
             assets["SCL"] = item.assets["SCL"].href
 
@@ -85,6 +99,7 @@ def search_sentinel2(
                 bbox=list(item.bbox) if item.bbox else bbox,
                 cloud_cover=item.properties.get("eo:cloud_cover"),
                 assets=assets,
+                scales=scales,
             )
         )
     logger.info("Found %d Sentinel-2 scenes for bbox=%s", len(results), bbox)
@@ -103,7 +118,12 @@ def _bbox_to_native(
     return west, south, east, north
 
 
-def _read_band(url: str, target_bbox: list[float], out_shape: tuple[int, int]) -> np.ndarray:
+def _read_band(
+    url: str,
+    target_bbox: list[float],
+    out_shape: tuple[int, int],
+    resampling: Resampling = Resampling.bilinear,
+) -> np.ndarray:
     """Read a single band crop from a remote COG, computing its own window."""
     with rasterio.open(url) as src:
         west, south, east, north = _bbox_to_native(target_bbox, src.crs)
@@ -116,7 +136,27 @@ def _read_band(url: str, target_bbox: list[float], out_shape: tuple[int, int]) -
         window = window.round_offsets().round_lengths()
         if window.width < 1 or window.height < 1:
             raise ValueError("Zero-pixel window")
-        return src.read(1, window=window, out_shape=out_shape)
+        return src.read(1, window=window, out_shape=out_shape, resampling=resampling)
+
+
+def assemble_crop(
+    band_arrays: dict[str, np.ndarray],
+    scl: np.ndarray,
+    scales: dict[str, tuple[float, float]],
+) -> np.ndarray:
+    """DN bands -> cloud-masked float32 reflectance cube (C,H,W) in S2_BAND_NAMES order.
+
+    Reflectance = dn * scale + offset per band (fallback (1e-4, 0.0)); pixels that the SCL
+    marks as not clear are NaN in every band.
+    """
+    missing = [b for b in S2_BANDS if b not in band_arrays]
+    if missing:
+        raise ValueError(f"missing bands {missing}")
+    layers = []
+    for band in S2_BANDS:
+        scale, offset = scales.get(band, DEFAULT_SCALE_OFFSET)
+        layers.append(band_arrays[band].astype(np.float32) * scale + offset)
+    return apply_cloud_mask(np.stack(layers), scl)
 
 
 def download_scene_crop(
@@ -139,10 +179,11 @@ def download_scene_crop(
         logger.debug("Scene %s already downloaded at %s", scene.scene_id, out_path)
         return out_path
 
-    asset_keys = bands or list(scene.assets.keys())
-    urls = [(key, scene.assets[key]) for key in asset_keys if key in scene.assets]
-    if not urls:
-        raise ValueError(f"No band URLs for scene {scene.scene_id}")
+    band_keys = [k for k in (bands or S2_BANDS) if k in scene.assets and k != "SCL"]
+    missing = [k for k in S2_BANDS if k not in band_keys]
+    if missing or "SCL" not in scene.assets:
+        raise ValueError(f"Scene {scene.scene_id} lacks bands {missing} or SCL")
+    urls = [(key, scene.assets[key]) for key in S2_BANDS]
 
     # Use the first (10m) band to establish the output grid
     first_url = urls[0][1]
@@ -156,43 +197,43 @@ def download_scene_crop(
         window = window.round_offsets().round_lengths()
         ref_transform = rasterio.windows.transform(window, src.transform)
         ref_shape = (int(window.height), int(window.width))
-        profile = src.profile.copy()
 
-    profile.update(
-        driver="GTiff",
-        height=ref_shape[0],
-        width=ref_shape[1],
-        count=len(urls),
-        transform=ref_transform,
-        compress="deflate",
-        crs=src_crs,
-    )
+    profile = {
+        "driver": "GTiff",
+        "height": ref_shape[0],
+        "width": ref_shape[1],
+        "count": len(S2_BANDS),
+        "dtype": "float32",
+        "nodata": float("nan"),
+        "transform": ref_transform,
+        "compress": "deflate",
+        "crs": src_crs,
+    }
 
-    band_arrays: list[tuple[int, np.ndarray]] = []
-
-    with ThreadPoolExecutor(max_workers=min(max_workers, len(urls))) as pool:
-        futures = {
-            pool.submit(_read_band, url, target_bbox, ref_shape): (idx, key)
-            for idx, (key, url) in enumerate(urls)
-        }
+    arrays: dict[str, np.ndarray] = {}
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(urls) + 1)) as pool:
+        futures = {pool.submit(_read_band, url, target_bbox, ref_shape): key for key, url in urls}
+        futures[
+            pool.submit(
+                _read_band,
+                scene.assets["SCL"],
+                target_bbox,
+                ref_shape,
+                Resampling.nearest,
+            )
+        ] = "SCL"
         for future in as_completed(futures):
-            idx, key = futures[future]
-            try:
-                band_arrays.append((idx, future.result()))
-            except Exception as exc:
-                logger.warning("Failed to read %s band %s: %s", scene.scene_id, key, exc)
+            # A missing band or SCL makes the crop unusable: let the error propagate.
+            arrays[futures[future]] = future.result()
 
-    if not band_arrays:
-        raise ValueError(f"No bands downloaded for scene {scene.scene_id}")
-
-    band_arrays.sort(key=lambda x: x[0])
-    profile["count"] = len(band_arrays)
+    scl = arrays.pop("SCL")
+    cube = assemble_crop(arrays, scl, scene.scales)
 
     with rasterio.open(out_path, "w", **profile) as dst:
-        for i, (_, arr) in enumerate(band_arrays, 1):
-            dst.write(arr, i)
+        dst.write(cube)
+        write_bandspec(dst, BandSpec(names=S2_BAND_NAMES, reflectance_scale=1.0))
 
-    logger.info("Downloaded %s → %s (%d bands)", scene.scene_id, out_path, len(band_arrays))
+    logger.info("Downloaded %s → %s (%d bands)", scene.scene_id, out_path, len(S2_BANDS))
     return out_path
 
 

@@ -11,6 +11,7 @@ import torch
 from rasterio.windows import Window
 
 from libs.features.indices import add_indices, normalize_percentile
+from libs.stac.client import S2_BAND_NAMES
 from services.training.lightning_module import LaunchSiteSegModule
 
 logger = logging.getLogger(__name__)
@@ -75,7 +76,7 @@ def sliding_window_inference(
             data = normalize_percentile(data)
 
             if use_indices and data.shape[0] == 6:
-                data = add_indices(data)
+                data = add_indices(data, S2_BAND_NAMES)[0]
 
             batch_images.append(data)
             batch_coords.append((row, col))
