@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 
 from libs.config import settings
 from libs.features.indices import build_temporal_composite
-from libs.features.stats import compute_channel_stats, save_stats
+from libs.features.stats import compute_channel_stats, load_stats, save_stats
 from libs.geo.bandspec import write_bandspec
 from libs.geo.chips import chip_raster, load_known_sites
 from libs.geo.labels import build_label_mask, write_label
@@ -28,9 +28,9 @@ from libs.geo.postprocess import (
     threshold_and_extract,
 )
 from libs.geo.splits import assign_splits
+from libs.inference.sliding_window import run_sliding_window
 from libs.stac.client import ingest_aoi
 from services.training.dataset import LaunchSiteDataset, collate
-from services.training.inference import load_model, sliding_window_inference
 from services.training.lightning_module import LaunchSiteSegModule
 
 TRITON_URL = os.environ.get("TRITON_URL", "")
@@ -216,65 +216,44 @@ def build_labels_task(
 
 @task(name="run-inference")
 def run_inference_task(
-    checkpoint_path: str,
     raster_path: str,
     output_path: str,
-    tile_size: int = 256,
-    overlap: int = 64,
-    device: str = "cpu",
-) -> str:
-    """Run sliding-window inference over a raster."""
-    model = load_model(checkpoint_path, device)
-    result = sliding_window_inference(
-        model=model,
-        raster_path=Path(raster_path),
-        output_path=Path(output_path),
-        tile_size=tile_size,
-        overlap=overlap,
-        device=device,
-    )
-    return str(result)
-
-
-@task(name="run-triton-inference")
-def run_triton_inference_task(
-    raster_path: str,
-    output_path: str,
+    stats_path: str,
+    serving_mode: str,
+    checkpoint_path: str = "",
     triton_url: str = "",
-    tile_size: int = 256,
+    memmap: bool = False,
+    tile: int = 256,
     overlap: int = 64,
     batch_size: int = 16,
-    use_memopt: bool = False,
-    max_memory_mb: float = 512.0,
 ) -> str:
-    """Run sliding-window inference via Triton Inference Server."""
-    from services.serving.triton_client import triton_sliding_window_inference
+    """Run sliding-window inference over a raster with a local or Triton predictor."""
+    if serving_mode == "triton":
+        from libs.inference.predictors import TritonPredictor
 
-    url = triton_url or TRITON_URL
-    if not url:
-        raise ValueError("Triton URL not set: pass triton_url or set TRITON_URL env var")
+        url = triton_url or TRITON_URL
+        if not url:
+            raise ValueError("Triton URL not set: pass triton_url or set TRITON_URL env var")
+        predictor = TritonPredictor.connect(url)
+    elif serving_mode == "local":
+        from libs.inference.predictors import LocalTorchPredictor
 
-    if use_memopt:
-        from services.serving.memory_optimized import memory_optimized_inference
-
-        result = memory_optimized_inference(
-            raster_path=Path(raster_path),
-            output_path=Path(output_path),
-            triton_url=url,
-            tile_size=tile_size,
-            overlap=overlap,
-            batch_size=batch_size,
-            max_memory_mb=max_memory_mb,
-        )
+        if not checkpoint_path:
+            raise ValueError("checkpoint_path is required for serving_mode='local'")
+        predictor = LocalTorchPredictor.from_checkpoint(checkpoint_path)
     else:
-        result = triton_sliding_window_inference(
-            raster_path=Path(raster_path),
-            output_path=Path(output_path),
-            triton_url=url,
-            tile_size=tile_size,
-            overlap=overlap,
-            batch_size=batch_size,
-        )
+        raise ValueError(f"Unknown serving_mode: {serving_mode!r}")
+
+    result = run_sliding_window(
+        raster_path=Path(raster_path),
+        output_path=Path(output_path),
+        predictor=predictor,
+        stats=load_stats(Path(stats_path)),
+        tile=tile,
+        overlap=overlap,
+        batch_size=batch_size,
+        memmap=memmap,
+    )
     return str(result)
 
 

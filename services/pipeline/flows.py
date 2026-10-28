@@ -20,7 +20,6 @@ from services.pipeline.tasks import (
     ingest_aoi_task,
     postprocess_task,
     run_inference_task,
-    run_triton_inference_task,
     store_detections_task,
     tile_composite_task,
     train_model_task,
@@ -157,7 +156,7 @@ def scan_and_detect_flow(
     checkpoint_path: str = "checkpoints/best.ckpt",
     model_version: str = "v0.1",
     threshold: float = 0.5,
-    device: str = "cpu",
+    stats_path: str = str(default_stats_path()),
     serving_mode: str = "",
     triton_url: str = "",
 ) -> int:
@@ -167,6 +166,7 @@ def scan_and_detect_flow(
         serving_mode: ``"local"`` for in-process PyTorch, ``"triton"`` for
             Triton Inference Server. Defaults to ``"triton"`` when the
             ``TRITON_URL`` env var is set, otherwise ``"local"``.
+        stats_path: Channel stats written at training time (must match the checkpoint).
         triton_url: Triton gRPC endpoint (overrides ``TRITON_URL`` env var).
 
     Returns:
@@ -191,19 +191,14 @@ def scan_and_detect_flow(
 
         prob_path = str(data_dir / "predictions" / f"{aoi_name}_prob.tif")
 
-        if serving_mode == "triton":
-            run_triton_inference_task(
-                raster_path=str(composite_path),
-                output_path=prob_path,
-                triton_url=triton_url,
-            )
-        else:
-            run_inference_task(
-                checkpoint_path=checkpoint_path,
-                raster_path=str(composite_path),
-                output_path=prob_path,
-                device=device,
-            )
+        run_inference_task(
+            raster_path=str(composite_path),
+            output_path=prob_path,
+            stats_path=stats_path,
+            serving_mode=serving_mode,
+            checkpoint_path=checkpoint_path,
+            triton_url=triton_url,
+        )
 
         geojson = postprocess_task(
             prob_raster_path=prob_path,
@@ -304,6 +299,7 @@ if __name__ == "__main__":
         help="Inference backend: 'local' (in-process PyTorch) or 'triton' (Triton server). "
         "Default: auto-detect via TRITON_URL env var.",
     )
+    p_detect.add_argument("--stats", default=str(default_stats_path()))
     p_detect.add_argument("--triton-url", default="", help="Triton gRPC endpoint")
 
     args = parser.parse_args()
@@ -340,6 +336,7 @@ if __name__ == "__main__":
             aoi_config_path=args.aoi_config,
             checkpoint_path=args.checkpoint,
             model_version=args.model_version,
+            stats_path=args.stats,
             serving_mode=args.serving_mode,
             triton_url=args.triton_url,
         )

@@ -107,24 +107,3 @@ def normalize(array: np.ndarray, stats: dict) -> np.ndarray:
     x = array.astype(np.float32)
     x = np.clip((x - p2) / np.maximum(p98 - p2, 1e-6), 0.0, 1.0)
     return (x - mean) / np.maximum(std, 1e-6)
-
-
-def normalize_percentile(
-    array: np.ndarray,
-    low: float = 2.0,
-    high: float = 98.0,
-) -> np.ndarray:
-    """Legacy per-tile stretch; removed in Task 6 when the last callers go.
-
-    Do not use in new code: use `normalize` with global stats instead.
-    """
-    result = np.empty_like(array, dtype=np.float32)
-    for i in range(array.shape[0]):
-        band = array[i]
-        lo = np.nanpercentile(band, low)
-        hi = np.nanpercentile(band, high)
-        if hi - lo < 1e-8:
-            result[i] = 0.0
-        else:
-            result[i] = np.clip((band - lo) / (hi - lo), 0.0, 1.0)
-    return result
