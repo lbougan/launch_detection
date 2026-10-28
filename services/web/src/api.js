@@ -37,6 +37,6 @@ export function evidenceThumbnailUrl(id, width = 256, height = 256) {
   return `${API_BASE}/evidence/${id}/thumbnail?width=${width}&height=${height}`;
 }
 
-export function vectorTileUrl() {
-  return `${API_BASE}/tiles/{z}/{x}/{y}.pbf`;
+export function vectorTileUrl(minScore = 0.1) {
+  return `${API_BASE}/tiles/{z}/{x}/{y}.pbf?min_score=${minScore}`;
 }

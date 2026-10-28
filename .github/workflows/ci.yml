@@ -53,4 +53,4 @@ jobs:
           enable-cache: true
       - run: uv sync --locked --all-extras
       - run: PGPASSWORD=changeme psql -v ON_ERROR_STOP=1 -h localhost -U launchsite -d launchsite -f infra/postgres-init/001_schema.sql
-      - run: uv run pytest -q -m api || [ $? -eq 5 ]
+      - run: uv run pytest -q -m api

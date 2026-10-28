@@ -52,6 +52,8 @@ let currentMinScore = 0.3;
 scoreSlider.addEventListener("input", (e) => {
   currentMinScore = e.target.value / 100;
   scoreValue.textContent = currentMinScore.toFixed(2);
+  const mvt = map.getSource("detections-mvt");
+  if (mvt) mvt.setTiles([vectorTileUrl(currentMinScore)]);
   loadDetections();
 });
 
@@ -97,7 +99,7 @@ map.on("load", async () => {
 function addVectorTileSource() {
   map.addSource("detections-mvt", {
     type: "vector",
-    tiles: [vectorTileUrl()],
+    tiles: [vectorTileUrl(currentMinScore)],
     minzoom: 0,
     maxzoom: 14,
   });

@@ -220,42 +220,92 @@ def postprocess_task(
     )
 
 
+def _bbox_4326(geometry: dict) -> list[float]:
+    """[min_lon, min_lat, max_lon, max_lat] of a GeoJSON geometry in EPSG:4326."""
+    from shapely.geometry import shape
+
+    return [float(v) for v in shape(geometry).bounds]
+
+
 @task(name="store-detections")
 def store_detections_task(
     geojson: dict,
     model_version: str,
+    composite_path: str,
+    scan_date: str,
     db_url: str | None = None,
 ) -> int:
-    """Store detections in PostGIS."""
-    url = db_url or settings.database_url
-    engine = create_engine(url)
+    """Store detections in PostGIS.
 
+    `score` holds the rank score (what the map filters on), `prob` the mean model
+    probability. `evidence` carries what the thumbnail endpoint needs to render:
+    the composite path and the detection's EPSG:4326 envelope.
+    """
+    engine = create_engine(db_url or settings.database_url)
     features = geojson.get("features", [])
-    stored = 0
 
     with engine.begin() as conn:
         for feat in features:
             props = feat.get("properties", {})
-            geom_json = json.dumps(feat["geometry"])
+            prob = props.get("prob")
+            evidence = {
+                "prob": prob,
+                "rank_breakdown": props.get("rank_breakdown", {}),
+                "composite_path": composite_path,
+                "bbox": _bbox_4326(feat["geometry"]),
+                "model_version": model_version,
+                "scan_date": scan_date,
+            }
             conn.execute(
                 text("""
-                    INSERT INTO detections (geom, score, model_version, area_km2, compactness, evidence)
+                    INSERT INTO detections
+                        (geom, score, prob, model_version, area_km2, compactness, evidence)
                     VALUES (
                         ST_SetSRID(ST_GeomFromGeoJSON(:geom), 4326),
-                        :score, :model_version, :area_km2, :compactness, :evidence::jsonb
+                        :score, :prob, :model_version, :area_km2, :compactness,
+                        CAST(:evidence AS jsonb)
                     )
                 """),
                 {
-                    "geom": geom_json,
-                    # Task 8 adds a prob column; until then the DB score column holds rank_score.
-                    "score": props.get("rank_score", props.get("score", 0)),
+                    "geom": json.dumps(feat["geometry"]),
+                    "score": props.get("rank_score", 0.0),
+                    "prob": prob,
                     "model_version": model_version,
                     "area_km2": props.get("area_km2"),
                     "compactness": props.get("compactness"),
-                    "evidence": json.dumps(props),
+                    "evidence": json.dumps(evidence),
                 },
             )
-            stored += 1
 
-    logger.info("Stored %d detections (model_version=%s)", stored, model_version)
-    return stored
+    logger.info("Stored %d detections (model_version=%s)", len(features), model_version)
+    return len(features)
+
+
+@task(name="seed-known-sites")
+def seed_known_sites_task(known_sites_path: str, db_url: str | None = None) -> int:
+    """Insert the known-sites manifest into PostGIS; existing names are left alone.
+
+    Returns the number of newly inserted sites.
+    """
+    sites = load_known_sites(Path(known_sites_path))
+    engine = create_engine(db_url or settings.database_url)
+    inserted = 0
+    with engine.begin() as conn:
+        for site in sites:
+            result = conn.execute(
+                text("""
+                    INSERT INTO known_sites (name, country, geom, source)
+                    VALUES (:name, :country, ST_SetSRID(ST_MakePoint(:lon, :lat), 4326), :source)
+                    ON CONFLICT (name) DO NOTHING
+                """),
+                {
+                    "name": site["name"],
+                    "country": site.get("country"),
+                    "lon": float(site["lon"]),
+                    "lat": float(site["lat"]),
+                    "source": Path(known_sites_path).name,
+                },
+            )
+            inserted += result.rowcount
+    logger.info("Seeded %d new known sites from %s", inserted, known_sites_path)
+    return inserted

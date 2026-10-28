@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from datetime import date
 from pathlib import Path
 
 from prefect import flow
@@ -20,6 +21,7 @@ from services.pipeline.tasks import (
     ingest_aoi_task,
     postprocess_task,
     run_inference_task,
+    seed_known_sites_task,
     store_detections_task,
     tile_composite_task,
     train_model_task,
@@ -176,6 +178,7 @@ def scan_and_detect_flow(
     device: str = "cpu",
     serving_mode: str = "",
     triton_url: str = "",
+    known_sites_path: str = "data/manifests/known_sites.json",
 ) -> int:
     """Run inference over AOI composites, postprocess, and store detections.
 
@@ -186,10 +189,14 @@ def scan_and_detect_flow(
         device: Torch device for ``serving_mode='local'``.
         stats_path: Channel stats written at training time (must match the checkpoint).
         triton_url: Triton gRPC endpoint (overrides ``TRITON_URL`` env var).
+        known_sites_path: Manifest seeded into ``known_sites`` first, so the map
+            always has the reference layer.
 
     Returns:
         Total number of stored detections.
     """
+    seed_known_sites_task(known_sites_path)
+
     if not serving_mode:
         serving_mode = "triton" if os.environ.get("TRITON_URL") else "local"
 
@@ -197,6 +204,7 @@ def scan_and_detect_flow(
         aoi_config = json.load(f)
 
     data_dir = Path(settings.data_dir)
+    scan_date = date.today().isoformat()
     total_stored = 0
 
     for aoi in aoi_config["aois"]:
@@ -227,6 +235,8 @@ def scan_and_detect_flow(
         stored = store_detections_task(
             geojson=geojson,
             model_version=model_version,
+            composite_path=str(composite_path.resolve()),
+            scan_date=scan_date,
         )
         total_stored += stored
 
@@ -273,6 +283,7 @@ def full_pipeline_flow(
         aoi_config_path=aoi_config_path,
         checkpoint_path=checkpoint_path,
         model_version=model_version,
+        known_sites_path=known_sites_path,
     )
     print(f"Pipeline complete. {total} detections stored.")
 
@@ -311,6 +322,7 @@ if __name__ == "__main__":
     p_detect.add_argument("--aoi-config", default="data/manifests/aoi_config.json")
     p_detect.add_argument("--checkpoint", default="checkpoints/best.ckpt")
     p_detect.add_argument("--model-version", default="v0.1")
+    p_detect.add_argument("--known-sites", default="data/manifests/known_sites.json")
     p_detect.add_argument(
         "--serving-mode",
         default="",
@@ -358,6 +370,7 @@ if __name__ == "__main__":
             model_version=args.model_version,
             stats_path=args.stats,
             device=args.device,
+            known_sites_path=args.known_sites,
             serving_mode=args.serving_mode,
             triton_url=args.triton_url,
         )

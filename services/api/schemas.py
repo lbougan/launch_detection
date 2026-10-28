@@ -9,7 +9,8 @@ from pydantic import BaseModel, Field
 
 class DetectionOut(BaseModel):
     id: int
-    score: float
+    score: float  # rank score
+    prob: float | None = None  # mean model probability
     model_version: str
     area_km2: float | None = None
     compactness: float | None = None

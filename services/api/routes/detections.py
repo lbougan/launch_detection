@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+import json
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from geoalchemy2.functions import ST_MakeEnvelope
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -12,6 +14,39 @@ from services.api.models import Detection
 from services.api.schemas import DetectionDetail, DetectionListResponse, DetectionOut
 
 router = APIRouter()
+
+_COLUMNS = (
+    Detection.id,
+    Detection.score,
+    Detection.prob,
+    Detection.model_version,
+    Detection.area_km2,
+    Detection.compactness,
+    Detection.evidence,
+    Detection.created_at,
+    func.ST_X(func.ST_Centroid(Detection.geom)).label("centroid_lon"),
+    func.ST_Y(func.ST_Centroid(Detection.geom)).label("centroid_lat"),
+    func.ST_XMin(Detection.geom).label("xmin"),
+    func.ST_YMin(Detection.geom).label("ymin"),
+    func.ST_XMax(Detection.geom).label("xmax"),
+    func.ST_YMax(Detection.geom).label("ymax"),
+)
+
+
+def _row_to_out(row) -> DetectionOut:
+    return DetectionOut(
+        id=row.id,
+        score=row.score,
+        prob=row.prob,
+        model_version=row.model_version,
+        area_km2=row.area_km2,
+        compactness=row.compactness,
+        evidence=row.evidence or {},
+        centroid_lon=row.centroid_lon,
+        centroid_lat=row.centroid_lat,
+        bbox=[row.xmin, row.ymin, row.xmax, row.ymax],
+        created_at=row.created_at,
+    )
 
 
 @router.get("", response_model=DetectionListResponse)
@@ -25,104 +60,30 @@ def list_detections(
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ) -> DetectionListResponse:
-    """Query detections within a bounding box, filtered by score."""
+    """Query detections within a bounding box, filtered by rank score."""
     bbox = ST_MakeEnvelope(min_lon, min_lat, max_lon, max_lat, 4326)
+    filters = (Detection.geom.ST_Intersects(bbox), Detection.score >= min_score)
 
-    query = (
-        db.query(
-            Detection.id,
-            Detection.score,
-            Detection.model_version,
-            Detection.area_km2,
-            Detection.compactness,
-            Detection.evidence,
-            Detection.created_at,
-            func.ST_X(func.ST_Centroid(Detection.geom)).label("centroid_lon"),
-            func.ST_Y(func.ST_Centroid(Detection.geom)).label("centroid_lat"),
-            func.ST_AsGeoJSON(func.ST_Envelope(Detection.geom)).label("bbox_geojson"),
-        )
-        .filter(Detection.geom.ST_Intersects(bbox))
-        .filter(Detection.score >= min_score)
-        .order_by(Detection.score.desc())
+    rows = (
+        db.query(*_COLUMNS)
+        .filter(*filters)
+        .order_by(Detection.score.desc(), Detection.id)
         .offset(offset)
         .limit(limit)
+        .all()
     )
-
-    rows = query.all()
-    detections = []
-    for row in rows:
-        import json
-
-        bbox_geo = json.loads(row.bbox_geojson)
-        coords = bbox_geo["coordinates"][0]
-        flat_bbox = [coords[0][0], coords[0][1], coords[2][0], coords[2][1]]
-        detections.append(
-            DetectionOut(
-                id=row.id,
-                score=row.score,
-                model_version=row.model_version,
-                area_km2=row.area_km2,
-                compactness=row.compactness,
-                evidence=row.evidence or {},
-                centroid_lon=row.centroid_lon,
-                centroid_lat=row.centroid_lat,
-                bbox=flat_bbox,
-                created_at=row.created_at,
-            )
-        )
-
-    total = (
-        db.query(func.count(Detection.id))
-        .filter(Detection.geom.ST_Intersects(bbox))
-        .filter(Detection.score >= min_score)
-        .scalar()
-    )
-
-    return DetectionListResponse(count=total or 0, detections=detections)
+    total = db.query(func.count(Detection.id)).filter(*filters).scalar()
+    return DetectionListResponse(count=total or 0, detections=[_row_to_out(r) for r in rows])
 
 
 @router.get("/{detection_id}", response_model=DetectionDetail)
 def get_detection(detection_id: int, db: Session = Depends(get_db)) -> DetectionDetail:
     """Get a single detection with full geometry."""
     row = (
-        db.query(
-            Detection.id,
-            Detection.score,
-            Detection.model_version,
-            Detection.area_km2,
-            Detection.compactness,
-            Detection.evidence,
-            Detection.created_at,
-            func.ST_X(func.ST_Centroid(Detection.geom)).label("centroid_lon"),
-            func.ST_Y(func.ST_Centroid(Detection.geom)).label("centroid_lat"),
-            func.ST_AsGeoJSON(func.ST_Envelope(Detection.geom)).label("bbox_geojson"),
-            func.ST_AsGeoJSON(Detection.geom).label("geom_geojson"),
-        )
+        db.query(*_COLUMNS, func.ST_AsGeoJSON(Detection.geom).label("geom_geojson"))
         .filter(Detection.id == detection_id)
         .first()
     )
-
     if not row:
-        from fastapi import HTTPException
-
         raise HTTPException(status_code=404, detail="Detection not found")
-
-    import json
-
-    bbox_geo = json.loads(row.bbox_geojson)
-    coords = bbox_geo["coordinates"][0]
-    flat_bbox = [coords[0][0], coords[0][1], coords[2][0], coords[2][1]]
-
-    return DetectionDetail(
-        id=row.id,
-        score=row.score,
-        model_version=row.model_version,
-        area_km2=row.area_km2,
-        compactness=row.compactness,
-        evidence=row.evidence or {},
-        centroid_lon=row.centroid_lon,
-        centroid_lat=row.centroid_lat,
-        bbox=flat_bbox,
-        created_at=row.created_at,
-        geojson=json.loads(row.geom_geojson),
-    )
+    return DetectionDetail(**_row_to_out(row).model_dump(), geojson=json.loads(row.geom_geojson))
