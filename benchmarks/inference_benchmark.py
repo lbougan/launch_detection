@@ -207,7 +207,7 @@ def benchmark_triton(
             probs = client.infer_batch(batch_array)
             batch_latencies.append((time.perf_counter() - bt0) * 1000)
 
-            for (row, col), tile_prob in zip(coords, probs):
+            for (row, col), tile_prob in zip(coords, probs, strict=False):
                 prob_map[row : row + tile_size, col : col + tile_size] += tile_prob
                 count_map[row : row + tile_size, col : col + tile_size] += 1.0
 

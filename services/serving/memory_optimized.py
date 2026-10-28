@@ -194,6 +194,6 @@ def _accumulate_batch(
     batch_array = np.stack(images)
     probs = client.infer_batch(batch_array)
 
-    for (row, col), tile_prob in zip(coords, probs):
+    for (row, col), tile_prob in zip(coords, probs, strict=False):
         prob_map[row : row + tile_size, col : col + tile_size] += tile_prob
         count_map[row : row + tile_size, col : col + tile_size] += 1.0

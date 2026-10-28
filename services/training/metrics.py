@@ -102,7 +102,7 @@ def calibration_bins(
     bin_confidence = []
     bin_count = []
 
-    for lo, hi in zip(bin_edges[:-1], bin_edges[1:]):
+    for lo, hi in zip(bin_edges[:-1], bin_edges[1:], strict=False):
         mask = (scores >= lo) & (scores < hi)
         count = mask.sum()
         bin_count.append(int(count))

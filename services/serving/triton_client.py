@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 import numpy as np
 import tritonclient.grpc as grpcclient
@@ -238,7 +238,7 @@ def triton_sliding_window_inference(
             ):
                 probs = client.infer_batch(batch_array)
 
-                for (row, col), tile_prob in zip(coords, probs):
+                for (row, col), tile_prob in zip(coords, probs, strict=False):
                     prob_map[row : row + tile_size, col : col + tile_size] += tile_prob
                     count_map[row : row + tile_size, col : col + tile_size] += 1.0
 

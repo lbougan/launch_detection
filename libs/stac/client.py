@@ -9,13 +9,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import planetary_computer as pc
 import pystac_client
-import numpy as np
 import rasterio
 from pyproj import Transformer
 from rasterio.windows import from_bounds
-
 
 logger = logging.getLogger(__name__)
 

@@ -19,3 +19,8 @@ scratch/
 !docs/model-card.md
 !docs/dataset-card.md
 docs/superpowers/
+!docs/hardware.md
+.coverage
+htmlcov/
+coverage.xml
+.venv/
