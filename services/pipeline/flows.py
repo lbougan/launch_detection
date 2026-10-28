@@ -9,7 +9,7 @@ from pathlib import Path
 
 from prefect import flow
 
-from libs.config import settings
+from libs.config import default_stats_path, settings
 from services.pipeline.tasks import (
     build_composite_task,
     build_labels_task,
@@ -83,7 +83,7 @@ def ingest_and_preprocess_flow(
     if composite_paths:
         compute_stats_task(
             composite_paths=composite_paths,
-            output_path=str(data_dir / "manifests" / "channel_stats.json"),
+            output_path=str(default_stats_path()),
         )
 
     labeled_chips = build_labels_task(
@@ -102,8 +102,7 @@ def ingest_and_preprocess_flow(
 @flow(name="train-model", log_prints=True)
 def train_flow(
     manifest_path: str = "data/manifests/chip_manifest.json",
-    known_sites_path: str = "data/manifests/known_sites.json",
-    stats_path: str = "data/manifests/channel_stats.json",
+    stats_path: str = str(default_stats_path()),
     model_type: str = "unet",
     encoder: str = "resnet34",
     in_channels: int = 10,
@@ -229,7 +228,7 @@ def full_pipeline_flow(
     if not skip_training:
         best_ckpt = train_flow(
             manifest_path=manifest_path,
-            known_sites_path=known_sites_path,
+            stats_path=str(default_stats_path()),
             epochs=epochs,
             batch_size=batch_size,
             gpus=gpus,
@@ -270,7 +269,7 @@ if __name__ == "__main__":
 
     p_train = sub.add_parser("train", help="Run training only")
     p_train.add_argument("--manifest", default="data/manifests/chip_manifest.json")
-    p_train.add_argument("--known-sites", default="data/manifests/known_sites.json")
+    p_train.add_argument("--stats", default=str(default_stats_path()))
     p_train.add_argument("--epochs", type=int, default=50)
     p_train.add_argument("--batch-size", type=int, default=16)
     p_train.add_argument("--gpus", type=int, default=0)
@@ -312,7 +311,7 @@ if __name__ == "__main__":
     elif args.command == "train":
         train_flow(
             manifest_path=args.manifest,
-            known_sites_path=args.known_sites,
+            stats_path=args.stats,
             epochs=args.epochs,
             batch_size=args.batch_size,
             gpus=args.gpus,

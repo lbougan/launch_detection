@@ -30,3 +30,8 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def default_stats_path() -> Path:
+    """Where channel statistics live, relative to the configured data directory."""
+    return settings.data_dir / "manifests" / "channel_stats.json"

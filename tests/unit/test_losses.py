@@ -24,3 +24,20 @@ def test_no_label_smoothing_targets_reach_zero_loss():
     logits = torch.full((1, 1, 2, 2), 20.0)
     target = torch.ones(1, 1, 2, 2)
     assert loss_fn(logits, target, torch.ones_like(target)).item() < 1e-3
+
+
+def test_ignore_pixels_do_not_contribute_to_dice():
+    loss_fn = CombinedLoss()
+    target = torch.zeros(1, 1, 4, 4)
+    target[0, 0, :2, :2] = 1.0
+    logits = torch.where(target > 0, torch.tensor(5.0), torch.tensor(-5.0))
+    ignored = torch.ones_like(target)
+    ignored[0, 0, 3, 3] = 0.0
+    # Baseline: the pixel is ignored (weight 0) and predicted correctly.
+    base = loss_fn(logits, target, ignored).item()
+    # Same pixel, ignored, but predicted strongly positive: loss unchanged.
+    wrong = logits.clone()
+    wrong[0, 0, 3, 3] = 10.0
+    assert abs(loss_fn(wrong, target, ignored).item() - base) < 1e-6
+    # Not ignored: loss strictly greater.
+    assert loss_fn(wrong, target, torch.ones_like(target)).item() > base
