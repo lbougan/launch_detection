@@ -135,7 +135,7 @@ def _dedupe_dbscan(detections: list[Detection], eps_deg: float) -> list[Detectio
     clustering = DBSCAN(eps=eps_deg, min_samples=1, metric="euclidean").fit(coords)
 
     cluster_best: dict[int, Detection] = {}
-    for det, label in zip(detections, clustering.labels_, strict=False):
+    for det, label in zip(detections, clustering.labels_, strict=True):
         if label not in cluster_best or det.score > cluster_best[label].score:
             cluster_best[label] = det
 

@@ -8,6 +8,8 @@ Implements the spec's key metrics:
 
 from __future__ import annotations
 
+from itertools import pairwise
+
 import numpy as np
 from shapely.geometry import Point
 
@@ -102,7 +104,7 @@ def calibration_bins(
     bin_confidence = []
     bin_count = []
 
-    for lo, hi in zip(bin_edges[:-1], bin_edges[1:], strict=False):
+    for lo, hi in pairwise(bin_edges):
         mask = (scores >= lo) & (scores < hi)
         count = mask.sum()
         bin_count.append(int(count))

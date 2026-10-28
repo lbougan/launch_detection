@@ -238,7 +238,7 @@ def triton_sliding_window_inference(
             ):
                 probs = client.infer_batch(batch_array)
 
-                for (row, col), tile_prob in zip(coords, probs, strict=False):
+                for (row, col), tile_prob in zip(coords, probs, strict=True):
                     prob_map[row : row + tile_size, col : col + tile_size] += tile_prob
                     count_map[row : row + tile_size, col : col + tile_size] += 1.0
 
