@@ -101,24 +101,31 @@ def update_readme(readme: Path, table: str, checkpoint: str, commit: str) -> Non
     readme.write_text(text[: start + len(START_MARK)] + block + text[end:])
 
 
-def main() -> None:
+def build_parser():
     import argparse
-    import subprocess
 
-    from libs.geo.chips import load_known_sites
-    from libs.inference.predictors import LocalTorchPredictor
+    from libs.config import default_stats_path
 
     ap = argparse.ArgumentParser(description="Evaluate a checkpoint on held-out sites")
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--manifest", default="data/manifests/chip_manifest.json")
-    ap.add_argument("--stats", default="data/manifests/stats.json")
+    ap.add_argument("--stats", default=str(default_stats_path()))
     ap.add_argument("--sites", default="data/manifests/known_sites.json")
     ap.add_argument("--splits", default="data/manifests/splits.json")
     ap.add_argument("--composites-dir", default="data/composites")
     ap.add_argument("--out-dir", default="out/eval")
     ap.add_argument("--split", choices=["val", "test"], action="append", default=None)
     ap.add_argument("--update-readme", type=Path)
-    args = ap.parse_args()
+    return ap
+
+
+def main() -> None:
+    import subprocess
+
+    from libs.geo.chips import load_known_sites
+    from libs.inference.predictors import LocalTorchPredictor
+
+    args = build_parser().parse_args()
     logging.basicConfig(level=logging.INFO)
 
     sites = load_known_sites(Path(args.sites))

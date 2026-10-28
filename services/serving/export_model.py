@@ -145,7 +145,9 @@ def _validate_onnx(
     logger.info("ONNX validation passed (atol=%s)", atol)
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    from libs.config import default_stats_path
+
     parser = argparse.ArgumentParser(description="Export LaunchSiteSegModule checkpoint to ONNX")
     parser.add_argument("--checkpoint", required=True, help="Path to .ckpt Lightning checkpoint")
     parser.add_argument(
@@ -153,13 +155,18 @@ def main() -> None:
         default="model_repository/unet_seg/1/model.onnx",
         help="Output ONNX path",
     )
-    parser.add_argument("--stats", default="data/manifests/stats.json", help="Path to stats.json")
+    parser.add_argument(
+        "--stats", default=str(default_stats_path()), help="Path to channel_stats.json"
+    )
     parser.add_argument("--in-channels", type=int, default=DEFAULT_IN_CHANNELS)
     parser.add_argument("--tile-size", type=int, default=DEFAULT_TILE_SIZE)
     parser.add_argument("--opset", type=int, default=17)
     parser.add_argument("--skip-validation", action="store_true", help="Skip ORT validation")
+    return parser
 
-    args = parser.parse_args()
+
+def main() -> None:
+    args = build_parser().parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
 
     export_to_onnx(

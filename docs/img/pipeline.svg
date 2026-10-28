@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1070" height="250" viewBox="0 0 1070 250" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12">
+  <defs><marker id="a" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#555"/></marker></defs>
+  <rect width="1070" height="250" fill="#fff"/>
+  <g font-weight="bold" text-anchor="middle">
+    <rect x="15" y="60" width="140" height="70" rx="8" fill="#e3f2fd" stroke="#1565c0"/><text x="85" y="88">1 ingest</text>
+    <rect x="165" y="60" width="140" height="70" rx="8" fill="#e8f5e9" stroke="#2e7d32"/><text x="235" y="88">2 composite</text>
+    <rect x="315" y="60" width="140" height="70" rx="8" fill="#fff3e0" stroke="#ef6c00"/><text x="385" y="88">3 chips + labels</text>
+    <rect x="465" y="60" width="140" height="70" rx="8" fill="#f3e5f5" stroke="#6a1b9a"/><text x="535" y="88">4 train</text>
+    <rect x="615" y="60" width="140" height="70" rx="8" fill="#fce4ec" stroke="#ad1457"/><text x="685" y="88">5 infer</text>
+    <rect x="765" y="60" width="140" height="70" rx="8" fill="#e0f7fa" stroke="#00838f"/><text x="835" y="88">6 postprocess</text>
+    <rect x="915" y="60" width="140" height="70" rx="8" fill="#eee" stroke="#666"/><text x="985" y="88">7 PostGIS</text>
+  </g>
+  <g fill="#444" text-anchor="middle" font-size="11">
+    <text x="85" y="106">STAC + SCL mask</text><text x="85" y="121">reflectance crops</text>
+    <text x="235" y="106">NaN-median</text><text x="235" y="121">BandSpec tag</text>
+    <text x="385" y="106">0 / ignore / 1, metres</text><text x="385" y="121">site-held-out split</text>
+    <text x="535" y="106">UNet, weighted</text><text x="535" y="121">focal + dice</text>
+    <text x="685" y="106">one sliding window</text><text x="685" y="121">local or Triton</text>
+    <text x="835" y="106">threshold, polygons</text><text x="835" y="121">prob + rank, dedupe m</text>
+    <text x="985" y="106">detections</text><text x="985" y="121">+ map</text>
+  </g>
+  <g stroke="#555" stroke-width="1.5" marker-end="url(#a)">
+    <line x1="155" y1="95" x2="163" y2="95"/><line x1="305" y1="95" x2="313" y2="95"/><line x1="455" y1="95" x2="463" y2="95"/>
+    <line x1="605" y1="95" x2="613" y2="95"/><line x1="755" y1="95" x2="763" y2="95"/><line x1="905" y1="95" x2="913" y2="95"/>
+  </g>
+  <rect x="165" y="170" width="590" height="44" rx="8" fill="#fafafa" stroke="#999" stroke-dasharray="5 4"/>
+  <text x="460" y="188" text-anchor="middle" fill="#333">stats.json: one global normalisation, computed on training composites, used by 4 and 5</text>
+  <text x="460" y="205" text-anchor="middle" fill="#666" font-size="11">embedded in the ONNX export so Triton clients apply the identical transform</text>
+  <g stroke="#999" stroke-width="1.2" fill="none" marker-end="url(#a)">
+    <path d="M235,130 L235,168"/><path d="M535,168 L535,132"/><path d="M685,168 L685,132"/>
+  </g>
+</svg>

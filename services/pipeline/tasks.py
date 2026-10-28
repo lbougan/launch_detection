@@ -47,8 +47,9 @@ def ingest_aoi_task(
     date_range: str,
     output_dir: str,
     max_cloud_cover: float = 20.0,
+    limit: int = 50,
 ) -> list[str]:
-    """Ingest satellite imagery for a single AOI."""
+    """Ingest satellite imagery for a single AOI (at most ``limit`` scenes)."""
     from libs.stac.client import ingest_aoi
 
     paths = ingest_aoi(
@@ -56,6 +57,7 @@ def ingest_aoi_task(
         date_range=date_range,
         output_dir=Path(output_dir),
         max_cloud_cover=max_cloud_cover,
+        limit=limit,
     )
     return [str(p) for p in paths]
 

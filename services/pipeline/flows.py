@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import os
@@ -39,8 +40,12 @@ def ingest_and_preprocess_flow(
     known_sites_path: str = "data/manifests/known_sites.json",
     splits_path: str = "data/manifests/splits.json",
     max_cloud_cover: float = 20.0,
+    max_scenes: int = 50,
 ) -> str:
     """Flow 1: Ingest imagery, build composites, tile, and create labels.
+
+    Args:
+        max_scenes: Upper bound on Sentinel-2 scenes searched and downloaded per AOI.
 
     Returns the path to the chip manifest JSON.
     """
@@ -65,6 +70,7 @@ def ingest_and_preprocess_flow(
             date_range=date_range,
             output_dir=str(aoi_dir),
             max_cloud_cover=max_cloud_cover,
+            limit=max_scenes,
         )
 
         s2_paths = [p for p in scene_paths if "sentinel2" in p]
@@ -291,9 +297,8 @@ def full_pipeline_flow(
     print(f"Pipeline complete. {total} detections stored.")
 
 
-if __name__ == "__main__":
-    import argparse
-
+def build_parser() -> argparse.ArgumentParser:
+    """CLI for the pipeline flows."""
     parser = argparse.ArgumentParser(description="Launch-site detection Prefect pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -313,6 +318,9 @@ if __name__ == "__main__":
     p_ingest.add_argument("--aoi-config", default="data/manifests/aoi_config.json")
     p_ingest.add_argument("--date-range", default="2024-01-01/2024-06-30")
     p_ingest.add_argument("--known-sites", default="data/manifests/known_sites.json")
+    p_ingest.add_argument(
+        "--max-scenes", type=int, default=50, help="Max Sentinel-2 scenes per AOI"
+    )
 
     p_train = sub.add_parser("train", help="Run training only")
     p_train.add_argument("--manifest", default="data/manifests/chip_manifest.json")
@@ -336,8 +344,11 @@ if __name__ == "__main__":
     p_detect.add_argument("--stats", default=str(default_stats_path()))
     p_detect.add_argument("--device", default="cpu", help="Torch device for local serving")
     p_detect.add_argument("--triton-url", default="", help="Triton gRPC endpoint")
+    return parser
 
-    args = parser.parse_args()
+
+def main(argv: list[str] | None = None) -> None:
+    args = build_parser().parse_args(argv)
 
     if args.command == "full":
         full_pipeline_flow(
@@ -357,6 +368,7 @@ if __name__ == "__main__":
             aoi_config_path=args.aoi_config,
             date_range=args.date_range,
             known_sites_path=args.known_sites,
+            max_scenes=args.max_scenes,
         )
     elif args.command == "train":
         train_flow(
@@ -377,3 +389,7 @@ if __name__ == "__main__":
             serving_mode=args.serving_mode,
             triton_url=args.triton_url,
         )
+
+
+if __name__ == "__main__":
+    main()
