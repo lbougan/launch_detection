@@ -1,6 +1,6 @@
 # Launch Site Detection (OSINT)
 
-Geospatial ML pipeline that detects static missile/rocket launch sites from open satellite imagery (Sentinel-2 + Sentinel-1). Candidates are surfaced through a FastAPI backend and explored on an interactive MapLibre web map.
+Geospatial ML pipeline that detects static missile/rocket launch sites from open satellite imagery (Sentinel-2). Candidates are surfaced through a FastAPI backend and explored on an interactive MapLibre web map.
 
 <p align="center">
   <img src="docs/lauch_detection_map.png" alt="Launch Site Detection — Web Map" width="800">
@@ -31,7 +31,6 @@ Geospatial ML pipeline that detects static missile/rocket launch sites from open
 | Sensor | Collection | Resolution | Bands used |
 |---|---|---|---|
 | **Sentinel-2 L2A** (optical) | `sentinel-2-l2a` | 10 m | B02, B03, B04 (visible), B08 (NIR), B11/B12 (SWIR) |
-| **Sentinel-1 RTC** (SAR, optional) | `sentinel-1-rtc` | 10 m | VV, VH |
 
 All imagery is discovered and downloaded via the [Microsoft Planetary Computer](https://planetarycomputer.microsoft.com/api/stac/v1) STAC API as Cloud-Optimized GeoTIFFs (COGs).
 
@@ -73,7 +72,7 @@ The default model is a **UNet with a ResNet-34 encoder** (ImageNet-pretrained) b
 | Encoder weights | ImageNet |
 | Framework | PyTorch Lightning ≥ 2.2 |
 
-An experimental `DualEncoderUNet` (separate optical + SAR branches) is defined but not used in the default pipeline.
+Sentinel-1 fusion is not part of v0.2.
 
 ### Training
 
@@ -143,7 +142,6 @@ The `config.pbtxt` configures:
 `services/serving/triton_client.py` provides two client classes:
 
 - **`TritonSegClient`** — synchronous gRPC client with retry logic and exponential backoff. Used by the pipeline tasks.
-- **`AsyncTritonSegClient`** — async gRPC client for concurrent tile submission.
 
 Both clients construct Triton `InferInput`/`InferRequestedOutput` tensors, send batches over gRPC, and apply sigmoid to the returned logits.
 

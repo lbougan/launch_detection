@@ -24,28 +24,6 @@ def load_model(checkpoint_path: str | Path, device: str = "cpu") -> LaunchSiteSe
     return module
 
 
-def predict_tile(
-    model: LaunchSiteSegModule,
-    image: np.ndarray,
-    device: str = "cpu",
-) -> np.ndarray:
-    """Run inference on a single tile.
-
-    Args:
-        model: Loaded Lightning module.
-        image: (C, H, W) float32 array (already normalized + indices).
-        device: torch device.
-
-    Returns:
-        (H, W) float32 probability map.
-    """
-    tensor = torch.from_numpy(image[None]).float().to(device)
-    with torch.no_grad():
-        logits = model(tensor)
-    probs = torch.sigmoid(logits).squeeze().cpu().numpy()
-    return probs
-
-
 def sliding_window_inference(
     model: LaunchSiteSegModule,
     raster_path: Path,

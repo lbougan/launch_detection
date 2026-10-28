@@ -135,7 +135,6 @@ def ingest_aoi_task(
     date_range: str,
     output_dir: str,
     max_cloud_cover: float = 20.0,
-    include_s1: bool = False,
 ) -> list[str]:
     """Ingest satellite imagery for a single AOI."""
     paths = ingest_aoi(
@@ -143,7 +142,6 @@ def ingest_aoi_task(
         date_range=date_range,
         output_dir=Path(output_dir),
         max_cloud_cover=max_cloud_cover,
-        include_s1=include_s1,
     )
     return [str(p) for p in paths]
 

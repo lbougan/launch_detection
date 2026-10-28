@@ -1,4 +1,4 @@
-"""STAC discovery and download for Sentinel-2 and Sentinel-1 imagery."""
+"""STAC discovery and download for Sentinel-2 imagery."""
 
 from __future__ import annotations
 
@@ -27,7 +27,6 @@ os.environ.setdefault("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".tif,.tiff")
 STAC_API_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
 
 SENTINEL2_COLLECTION = "sentinel-2-l2a"
-SENTINEL1_COLLECTION = "sentinel-1-rtc"
 
 S2_BANDS = ["B02", "B03", "B04", "B08", "B11", "B12"]
 S2_BAND_NAMES = ["blue", "green", "red", "nir", "swir16", "swir22"]
@@ -89,40 +88,6 @@ def search_sentinel2(
             )
         )
     logger.info("Found %d Sentinel-2 scenes for bbox=%s", len(results), bbox)
-    return results
-
-
-def search_sentinel1(
-    bbox: list[float],
-    date_range: str,
-    limit: int = 50,
-) -> list[SceneMetadata]:
-    """Search for Sentinel-1 RTC scenes."""
-    client = get_stac_client()
-    search = client.search(
-        collections=[SENTINEL1_COLLECTION],
-        bbox=bbox,
-        datetime=date_range,
-        max_items=limit,
-    )
-    results = []
-    for item in search.items():
-        assets = {}
-        for key in ("vh", "vv"):
-            if key in item.assets:
-                assets[key] = item.assets[key].href
-
-        results.append(
-            SceneMetadata(
-                scene_id=item.id,
-                sensor="sentinel-1",
-                datetime=item.datetime.isoformat() if item.datetime else "",
-                bbox=list(item.bbox) if item.bbox else bbox,
-                cloud_cover=None,
-                assets=assets,
-            )
-        )
-    logger.info("Found %d Sentinel-1 scenes for bbox=%s", len(results), bbox)
     return results
 
 
@@ -262,21 +227,14 @@ def ingest_aoi(
     date_range: str,
     output_dir: Path,
     max_cloud_cover: float = 20.0,
-    include_s1: bool = False,
     limit: int = 50,
     max_scene_workers: int = 4,
 ) -> list[Path]:
-    """End-to-end ingestion for a single AOI: search + download crops.
-
-    Scene downloads run concurrently (max_scene_workers threads),
-    and each scene's band reads are also threaded internally.
-    """
+    """Search Sentinel-2 L2A over the AOI and download cropped scenes concurrently."""
     output_dir = Path(output_dir)
     s2_dir = output_dir / "sentinel2"
-    downloaded: list[Path] = []
-
     scenes = search_sentinel2(bbox, date_range, max_cloud_cover, limit=limit)
-
+    downloaded: list[Path] = []
     with ThreadPoolExecutor(max_workers=max_scene_workers) as pool:
         futures = {
             pool.submit(_download_one_scene, scene, bbox, s2_dir, S2_BANDS, i, len(scenes)): scene
@@ -286,21 +244,5 @@ def ingest_aoi(
             path = future.result()
             if path is not None:
                 downloaded.append(path)
-
-    if include_s1:
-        s1_dir = output_dir / "sentinel1"
-        s1_scenes = search_sentinel1(bbox, date_range, limit=limit)
-        with ThreadPoolExecutor(max_workers=max_scene_workers) as pool:
-            futures = {
-                pool.submit(
-                    _download_one_scene, scene, bbox, s1_dir, None, i, len(s1_scenes)
-                ): scene
-                for i, scene in enumerate(s1_scenes, 1)
-            }
-            for future in as_completed(futures):
-                path = future.result()
-                if path is not None:
-                    downloaded.append(path)
-
     logger.info("Ingested %d scenes for AOI bbox=%s", len(downloaded), bbox)
     return downloaded

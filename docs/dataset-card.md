@@ -7,7 +7,7 @@ Tiled satellite imagery chips for training and evaluating launch-site segmentati
 ## Sources
 
 - **Sentinel-2 L2A** (optical, 10m GSD): Bands B02, B03, B04, B08, B11, B12
-- **Sentinel-1 RTC** (SAR, 10m GSD): VV and VH polarizations (v2 fusion)
+- Sentinel-1 fusion is not part of v0.2.
 - **Known sites**: 18 publicly documented launch sites / spaceports worldwide
 
 ## Data Format

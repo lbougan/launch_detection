@@ -9,7 +9,6 @@ from pathlib import Path
 
 import numpy as np
 import tritonclient.grpc as grpcclient
-import tritonclient.grpc.aio as grpcclient_aio
 
 from libs.features.indices import add_indices, normalize_percentile
 
@@ -96,48 +95,6 @@ class TritonSegClient:
 
     def close(self) -> None:
         self._client.close()
-
-
-class AsyncTritonSegClient:
-    """Async gRPC client for concurrent tile submission."""
-
-    def __init__(
-        self,
-        url: str = DEFAULT_TRITON_URL,
-        model_name: str = DEFAULT_MODEL_NAME,
-        model_version: str = DEFAULT_MODEL_VERSION,
-    ):
-        self.url = url
-        self.model_name = model_name
-        self.model_version = model_version
-        self._client = grpcclient_aio.InferenceServerClient(url=url)
-
-    async def ensure_ready(self) -> None:
-        if not await self._client.is_server_live():
-            raise ConnectionError(f"Triton server at {self.url} is not live")
-        if not await self._client.is_model_ready(self.model_name, self.model_version):
-            raise RuntimeError(f"Model {self.model_name} not ready")
-
-    async def infer_batch_async(self, images: np.ndarray) -> np.ndarray:
-        """Async batch inference returning sigmoid probabilities."""
-        images = np.ascontiguousarray(images, dtype=np.float32)
-
-        inp = grpcclient_aio.InferInput("input", list(images.shape), "FP32")
-        inp.set_data_from_numpy(images)
-
-        out = grpcclient_aio.InferRequestedOutput("output")
-
-        result = await self._client.infer(
-            model_name=self.model_name,
-            model_version=self.model_version,
-            inputs=[inp],
-            outputs=[out],
-        )
-        logits = result.as_numpy("output")
-        return _sigmoid(logits.squeeze(1))
-
-    async def close(self) -> None:
-        await self._client.close()
 
 
 def _sigmoid(x: np.ndarray) -> np.ndarray:

@@ -31,7 +31,7 @@ Focal loss (alpha=0.25, gamma=2.0) handles extreme class imbalance.
 - 10m resolution cannot detect small pads; detects compound-level structures
 - Weak labels introduce noise; model may miss unusual site layouts
 - Temporal composites may blur active construction
-- SAR fusion (v2) not included in baseline
+- Sentinel-1 fusion is not part of v0.2.
 
 ## Intended Use
 
