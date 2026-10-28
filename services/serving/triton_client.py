@@ -11,7 +11,7 @@ import numpy as np
 import tritonclient.grpc as grpcclient
 
 from libs.features.indices import add_indices, normalize_percentile
-from libs.stac.client import S2_BAND_NAMES
+from libs.geo.bandspec import S2_BAND_NAMES
 
 logger = logging.getLogger(__name__)
 

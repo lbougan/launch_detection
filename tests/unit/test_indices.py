@@ -84,3 +84,15 @@ def test_normalize_rejects_channel_mismatch():
     stats = {"channels": ["a"], "p2": [0.0], "p98": [1.0], "mean": [0.5], "std": [0.5]}
     with pytest.raises(ValueError, match="channels"):
         normalize(np.zeros((2, 1, 1), dtype=np.float32), stats)
+
+
+def test_all_nan_composite_emits_no_warning(tmp_path):
+    import warnings
+
+    a = np.full((6, 2, 2), np.nan, dtype=np.float32)
+    p = write_composite(tmp_path / "s.tif", a)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        for method in ("median", "mean"):
+            comp, _, _ = build_temporal_composite([p], method=method)
+            assert np.isnan(comp).all()

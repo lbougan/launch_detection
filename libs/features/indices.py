@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -79,12 +80,13 @@ def build_temporal_composite(
                 profile = src.profile.copy()
                 spec = read_bandspec(src)
     cube = np.stack(arrays, axis=0)
-    if method == "median":
-        composite = np.nanmedian(cube, axis=0)
-    elif method == "mean":
-        composite = np.nanmean(cube, axis=0)
-    else:
+    if method not in ("median", "mean"):
         raise ValueError(f"Unknown method: {method}")
+    reducer = np.nanmedian if method == "median" else np.nanmean
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="All-NaN slice", category=RuntimeWarning)
+        warnings.filterwarnings("ignore", message="Mean of empty slice", category=RuntimeWarning)
+        composite = reducer(cube, axis=0)
     profile.update(dtype="float32", nodata=float("nan"), count=composite.shape[0])
     return composite.astype(np.float32), profile, spec
 

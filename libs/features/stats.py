@@ -29,7 +29,10 @@ def compute_channel_stats(
             cube = src.read().astype(np.float32)
             spec = read_bandspec(src)
         cube, names = add_indices(cube, spec.names)
-        channels = channels or names
+        if channels is None:
+            channels = names
+        elif names != channels:
+            raise ValueError(f"channel names differ in {p}: {names} != {channels}")
         flat = cube.reshape(cube.shape[0], -1)
         valid = ~np.isnan(flat).any(axis=0)
         cols = np.flatnonzero(valid)

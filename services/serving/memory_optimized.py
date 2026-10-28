@@ -11,7 +11,7 @@ import rasterio
 from rasterio.windows import Window
 
 from libs.features.indices import add_indices, normalize_percentile
-from libs.stac.client import S2_BAND_NAMES
+from libs.geo.bandspec import S2_BAND_NAMES
 from services.serving.triton_client import (
     DEFAULT_MODEL_NAME,
     DEFAULT_TRITON_URL,

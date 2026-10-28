@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 import rasterio
 
 TAG_KEY = "BANDSPEC"
+S2_BAND_NAMES = ("blue", "green", "red", "nir", "swir16", "swir22")
 
 
 @dataclass(frozen=True)

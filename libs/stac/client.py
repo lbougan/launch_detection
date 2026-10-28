@@ -17,7 +17,7 @@ from pyproj import Transformer
 from rasterio.enums import Resampling
 from rasterio.windows import from_bounds
 
-from libs.geo.bandspec import BandSpec, write_bandspec
+from libs.geo.bandspec import S2_BAND_NAMES, TAG_KEY, BandSpec, write_bandspec
 from libs.geo.masks import apply_cloud_mask
 
 logger = logging.getLogger(__name__)
@@ -33,10 +33,13 @@ STAC_API_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
 SENTINEL2_COLLECTION = "sentinel-2-l2a"
 
 S2_BANDS = ["B02", "B03", "B04", "B08", "B11", "B12"]
-S2_BAND_NAMES = ("blue", "green", "red", "nir", "swir16", "swir22")
 # L2A digital numbers per reflectance unit; the per-band scale/offset from STAC take precedence
 S2_REFLECTANCE_SCALE = 10_000.0
 DEFAULT_SCALE_OFFSET = (1e-4, 0.0)
+# ESA added a +1000 DN offset from processing baseline 04.00 (25 Jan 2022)
+BASELINE_OFFSET_FROM = 4.0
+BASELINE_OFFSET = -0.1
+__all__ = ["S2_BAND_NAMES"]  # re-exported from libs.geo.bandspec
 
 
 @dataclass
@@ -48,6 +51,29 @@ class SceneMetadata:
     cloud_cover: float | None
     assets: dict[str, str]
     scales: dict[str, tuple[float, float]] = field(default_factory=dict)
+
+
+def scale_offset_for(asset_extra: dict, properties: dict) -> tuple[float, float]:
+    """Reflectance = DN * scale + offset for one asset.
+
+    Explicit `raster:bands` metadata wins; otherwise the offset follows from the
+    `s2:processing_baseline` item property (-0.1 from baseline 04.00).
+    """
+    rb = (asset_extra.get("raster:bands") or [{}])[0]
+    if "scale" in rb or "offset" in rb:
+        return (
+            float(rb.get("scale", DEFAULT_SCALE_OFFSET[0])),
+            float(rb.get("offset", DEFAULT_SCALE_OFFSET[1])),
+        )
+    baseline = float(properties.get("s2:processing_baseline", "0") or 0)
+    offset = BASELINE_OFFSET if baseline >= BASELINE_OFFSET_FROM else 0.0
+    return (DEFAULT_SCALE_OFFSET[0], offset)
+
+
+def is_pipeline_crop(path: Path) -> bool:
+    """True if the GeoTIFF carries the BANDSPEC tag (v0.1 crops are untagged, unmasked uint16)."""
+    with rasterio.open(path) as src:
+        return TAG_KEY in src.tags()
 
 
 def get_stac_client() -> pystac_client.Client:
@@ -83,11 +109,7 @@ def search_sentinel2(
         for band in S2_BANDS:
             if band in item.assets:
                 assets[band] = item.assets[band].href
-                rb = (item.assets[band].extra_fields.get("raster:bands") or [{}])[0]
-                scales[band] = (
-                    float(rb.get("scale", DEFAULT_SCALE_OFFSET[0])),
-                    float(rb.get("offset", DEFAULT_SCALE_OFFSET[1])),
-                )
+                scales[band] = scale_offset_for(item.assets[band].extra_fields, item.properties)
         if item.assets.get("SCL"):
             assets["SCL"] = item.assets["SCL"].href
 
@@ -163,7 +185,6 @@ def download_scene_crop(
     scene: SceneMetadata,
     target_bbox: list[float],
     output_dir: Path,
-    bands: list[str] | None = None,
     max_workers: int = 6,
 ) -> Path:
     """Download a cropped region of a scene's bands and stack into a single GeoTIFF.
@@ -176,11 +197,12 @@ def download_scene_crop(
     out_path = output_dir / f"{scene.scene_id}.tif"
 
     if out_path.exists():
-        logger.debug("Scene %s already downloaded at %s", scene.scene_id, out_path)
-        return out_path
+        if is_pipeline_crop(out_path):
+            logger.debug("Scene %s already downloaded at %s", scene.scene_id, out_path)
+            return out_path
+        logger.warning("Re-downloading %s: %s is a legacy untagged crop", scene.scene_id, out_path)
 
-    band_keys = [k for k in (bands or S2_BANDS) if k in scene.assets and k != "SCL"]
-    missing = [k for k in S2_BANDS if k not in band_keys]
+    missing = [k for k in S2_BANDS if k not in scene.assets]
     if missing or "SCL" not in scene.assets:
         raise ValueError(f"Scene {scene.scene_id} lacks bands {missing} or SCL")
     urls = [(key, scene.assets[key]) for key in S2_BANDS]
@@ -241,13 +263,12 @@ def _download_one_scene(
     scene: SceneMetadata,
     target_bbox: list[float],
     output_dir: Path,
-    bands: list[str] | None,
     idx: int,
     total: int,
 ) -> Path | None:
     t0 = time.time()
     try:
-        path = download_scene_crop(scene, target_bbox, output_dir, bands=bands)
+        path = download_scene_crop(scene, target_bbox, output_dir)
         sz = path.stat().st_size / 1e6
         logger.info(
             "  [%d/%d] %s  %.1f MB  %.1fs",
@@ -278,7 +299,7 @@ def ingest_aoi(
     downloaded: list[Path] = []
     with ThreadPoolExecutor(max_workers=max_scene_workers) as pool:
         futures = {
-            pool.submit(_download_one_scene, scene, bbox, s2_dir, S2_BANDS, i, len(scenes)): scene
+            pool.submit(_download_one_scene, scene, bbox, s2_dir, i, len(scenes)): scene
             for i, scene in enumerate(scenes, 1)
         }
         for future in as_completed(futures):
