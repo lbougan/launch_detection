@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+import shutil
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +20,7 @@ DEFAULT_TILE_SIZE = 256
 def export_to_onnx(
     checkpoint_path: str | Path,
     output_path: str | Path,
+    stats_path: str | Path,
     in_channels: int = DEFAULT_IN_CHANNELS,
     tile_size: int = DEFAULT_TILE_SIZE,
     opset_version: int = 17,
@@ -28,6 +31,7 @@ def export_to_onnx(
     Args:
         checkpoint_path: Path to the Lightning ``.ckpt`` file.
         output_path: Where to write ``model.onnx``.
+        stats_path: Normalisation ``stats.json``; embedded as metadata and copied next to the model.
         in_channels: Number of input channels the model expects.
         tile_size: Spatial dimension (H=W) of input tiles.
         opset_version: ONNX opset version.
@@ -42,7 +46,11 @@ def export_to_onnx(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    module = LaunchSiteSegModule.load_from_checkpoint(str(checkpoint_path), map_location="cpu")
+    # Rebuild from hparams + state_dict rather than load_from_checkpoint, which requires
+    # Lightning's version bookkeeping keys that plain ``torch.save`` checkpoints lack.
+    ckpt = torch.load(str(checkpoint_path), map_location="cpu", weights_only=False)
+    module = LaunchSiteSegModule(**ckpt["hyper_parameters"])
+    module.load_state_dict(ckpt["state_dict"])
     module.eval()
     model = module.model
 
@@ -60,13 +68,55 @@ def export_to_onnx(
         },
         opset_version=opset_version,
         do_constant_folding=True,
+        dynamo=False,
     )
     logger.info("Exported ONNX model → %s", output_path)
+
+    _embed_metadata(output_path, Path(stats_path), in_channels, tile_size)
+    stats_dest = output_path.parent / "stats.json"
+    if Path(stats_path).resolve() != stats_dest.resolve():
+        shutil.copyfile(stats_path, stats_dest)
 
     if validate:
         _validate_onnx(model, output_path, dummy_input)
 
     return output_path.resolve()
+
+
+def _git_commit() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "describe", "--always", "--dirty"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip() or "unknown"
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
+def _embed_metadata(onnx_path: Path, stats_path: Path, in_channels: int, tile_size: int) -> None:
+    """Append stats, band spec and provenance to the ONNX ``metadata_props``."""
+    import onnx
+
+    from libs.features.indices import INDEX_NAMES
+    from libs.geo.bandspec import S2_BAND_NAMES, BandSpec
+
+    entries = {
+        "stats_json": Path(stats_path).read_text(),
+        "bandspec_json": BandSpec(names=S2_BAND_NAMES, indices=INDEX_NAMES).to_json(),
+        "in_channels": str(in_channels),
+        "tile_size": str(tile_size),
+        "git_commit": _git_commit(),
+    }
+    model = onnx.load(str(onnx_path))
+    keep = [p for p in model.metadata_props if p.key not in entries]
+    del model.metadata_props[:]
+    model.metadata_props.extend(keep)
+    for key, value in entries.items():
+        model.metadata_props.add(key=key, value=value)
+    onnx.save(model, str(onnx_path))
 
 
 def _validate_onnx(
@@ -103,6 +153,7 @@ def main() -> None:
         default="model_repository/unet_seg/1/model.onnx",
         help="Output ONNX path",
     )
+    parser.add_argument("--stats", default="data/manifests/stats.json", help="Path to stats.json")
     parser.add_argument("--in-channels", type=int, default=DEFAULT_IN_CHANNELS)
     parser.add_argument("--tile-size", type=int, default=DEFAULT_TILE_SIZE)
     parser.add_argument("--opset", type=int, default=17)
@@ -114,6 +165,7 @@ def main() -> None:
     export_to_onnx(
         checkpoint_path=args.checkpoint,
         output_path=args.output,
+        stats_path=args.stats,
         in_channels=args.in_channels,
         tile_size=args.tile_size,
         opset_version=args.opset,

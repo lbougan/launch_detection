@@ -1,4 +1,9 @@
-"""Triton Inference Server gRPC client for UNet tile segmentation."""
+"""Triton Inference Server gRPC client for UNet tile segmentation.
+
+The client needs the same ``stats.json`` the model was exported with; the pipeline passes
+``stats_path`` explicitly (``TritonPredictor`` does not read ONNX metadata, and Triton's
+gRPC API does not expose ``metadata_props``).
+"""
 
 from __future__ import annotations
 
