@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 import rasterio
@@ -6,7 +7,7 @@ import rasterio
 from libs.features.stats import compute_channel_stats, save_stats
 from libs.geo.chips import chip_raster
 from libs.geo.labels import build_label_mask, write_label
-from services.training.fit import FitConfig, fit
+from services.training.fit import FitConfig, fit_with_trainer
 from tests.fixtures.synthetic import site_lonlat
 
 
@@ -45,5 +46,7 @@ def test_fit_runs_one_epoch_on_cpu_and_logs_site_recall(small_composite, tmp_pat
         limit_val_batches=1,
         val_composites=(str(path),),
     )
-    best = fit(cfg)
+    best, trainer = fit_with_trainer(cfg)
     assert best and Path(best).exists()
+    assert re.search(r"launchsite-00-\d\.\d{3}\.ckpt$", best)
+    assert "val/site_recall@10" in trainer.callback_metrics

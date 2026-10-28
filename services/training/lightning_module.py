@@ -101,14 +101,16 @@ class LaunchSiteSegModule(pl.LightningModule):
 
     def _log_site_metrics(self) -> None:
         """Log val/site_recall@10 every epoch (0.0 without val composites) for the checkpoint monitor."""
+        if self.trainer.sanity_checking:
+            return
         recall, fp = 0.0, 0.0
-        if self.hparams.val_composites:
+        if self.hparams.val_composites and self.trainer.is_global_zero:
             try:
                 recall, fp = self._site_metrics()
             except Exception:
                 logger.warning("site-level validation failed; logging 0.0", exc_info=True)
-        self.log("val/site_recall@10", recall, prog_bar=True)
-        self.log("val/fp_per_1000km2", fp)
+        self.log("val/site_recall@10", recall, prog_bar=True, sync_dist=True)
+        self.log("val/fp_per_1000km2", fp, sync_dist=True)
 
     def _site_metrics(self) -> tuple[float, float]:
         import json

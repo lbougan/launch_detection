@@ -247,6 +247,7 @@ def store_detections_task(
                 """),
                 {
                     "geom": geom_json,
+                    # Task 8 adds a prob column; until then the DB score column holds rank_score.
                     "score": props.get("rank_score", props.get("score", 0)),
                     "model_version": model_version,
                     "area_km2": props.get("area_km2"),

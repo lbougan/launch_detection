@@ -34,8 +34,28 @@ class FitConfig:
     val_composites: tuple[str, ...] = ()  # composites of validation AOIs for site-level metrics
 
 
+def resolve_monitor(cfg: FitConfig) -> tuple[str, str]:
+    """(monitor, mode); a recall monitor without val composites falls back to val/loss."""
+    if "site_recall" in cfg.monitor and not cfg.val_composites:
+        logger.warning(
+            "monitor=%s needs val_composites; falling back to val/loss (mode=min)", cfg.monitor
+        )
+        return "val/loss", "min"
+    return cfg.monitor, "max" if "recall" in cfg.monitor else "min"
+
+
+def checkpoint_filename(monitor: str) -> str:
+    """Template using the exact logged key (use with auto_insert_metric_name=False)."""
+    return "launchsite-{epoch:02d}-{" + monitor + ":.3f}"
+
+
 def fit(cfg: FitConfig) -> str:
     """Train and return the best checkpoint path."""
+    return fit_with_trainer(cfg)[0]
+
+
+def fit_with_trainer(cfg: FitConfig):
+    """Train; return (best checkpoint path, the pl.Trainer) so callers can inspect metrics."""
     import pytorch_lightning as pl
     import torch
     from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
@@ -85,17 +105,17 @@ def fit(cfg: FitConfig) -> str:
         logger_ = MLFlowLogger(
             experiment_name=cfg.experiment_name, tracking_uri=cfg.mlflow_tracking_uri
         )
-    mode = "max" if "recall" in cfg.monitor else "min"
+    monitor, mode = resolve_monitor(cfg)
     callbacks = [
         ModelCheckpoint(
             dirpath=cfg.checkpoint_dir,
-            monitor=cfg.monitor,
+            monitor=monitor,
             mode=mode,
             save_top_k=3,
-            filename="launchsite-{epoch:02d}-{" + cfg.monitor.replace("/", "_") + ":.3f}",
+            filename=checkpoint_filename(monitor),
             auto_insert_metric_name=False,
         ),
-        EarlyStopping(monitor=cfg.monitor, patience=10, mode=mode),
+        EarlyStopping(monitor=monitor, patience=10, mode=mode),
     ]
     trainer = pl.Trainer(
         max_epochs=cfg.epochs,
@@ -114,4 +134,4 @@ def fit(cfg: FitConfig) -> str:
     trainer.fit(module, train_loader, val_loader)
     best = trainer.checkpoint_callback.best_model_path
     logger.info("best checkpoint: %s", best)
-    return best
+    return best, trainer

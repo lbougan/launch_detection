@@ -128,11 +128,26 @@ def train_flow(
     batch_size: int = 16,
     gpus: int = 0,
     experiment_name: str = "launchsite-seg",
+    aoi_config_path: str = "data/manifests/aoi_config.json",
+    known_sites_path: str = "data/manifests/known_sites.json",
+    splits_path: str = "data/manifests/splits.json",
 ) -> str:
     """Flow 2: Train the segmentation model.
 
+    Validation AOIs' composites feed the site-level recall monitor.
     Returns the path to the best checkpoint.
     """
+    with open(aoi_config_path) as f:
+        aoi_config = json.load(f)
+    sites = load_known_sites(Path(known_sites_path))
+    with open(splits_path) as f:
+        splits = json.load(f)
+    composites_dir = Path(settings.data_dir) / "composites"
+    val_composites = [
+        str(composites_dir / f"{aoi['name']}_composite.tif")
+        for aoi in aoi_config["aois"]
+        if aoi_split(aoi, sites, splits) == "val"
+    ]
     best_ckpt = train_model_task(
         manifest_path=manifest_path,
         stats_path=stats_path,
@@ -143,6 +158,9 @@ def train_flow(
         batch_size=batch_size,
         gpus=gpus,
         experiment_name=experiment_name,
+        known_sites_path=known_sites_path,
+        splits_path=splits_path,
+        val_composites=tuple(val_composites),
     )
     print(f"Training complete. Best checkpoint: {best_ckpt}")
     return best_ckpt
