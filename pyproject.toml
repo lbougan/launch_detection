@@ -86,7 +86,15 @@ filterwarnings = ["ignore::DeprecationWarning:torch.*", "ignore::UserWarning:pyt
 
 [tool.coverage.run]
 source = ["libs", "services"]
-omit = ["services/web/*", "services/pipeline/flows.py", "services/serving/export_model.py"]
+# libs/stac/client.py: network I/O (its pure helpers are unit-tested). services/api/*: needs
+# PostGIS, covered by the api job (pytest -m api), not by the lint-and-unit gate.
+omit = [
+    "services/web/*",
+    "services/pipeline/flows.py",
+    "services/serving/export_model.py",
+    "libs/stac/client.py",
+    "services/api/*",
+]
 
 [tool.coverage.report]
 fail_under = 80

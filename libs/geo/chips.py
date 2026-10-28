@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import rasterio
+from rasterio.warp import transform_bounds
 from rasterio.windows import Window
 
 from libs.geo.bandspec import read_bandspec, write_bandspec
@@ -26,7 +27,8 @@ def chip_raster(
 ) -> list[dict]:
     """Slice a raster into square chips.
 
-    Returns a list of chip metadata dicts with tile_id, bbox, and file path.
+    Returns a list of chip metadata dicts with tile_id, path, bbox (in the raster's CRS),
+    bbox_4326 (lon/lat, what site distances are computed from), row_off and col_off.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -68,6 +70,7 @@ def chip_raster(
                         "tile_id": tile_id,
                         "path": str(out_path),
                         "bbox": list(bounds),
+                        "bbox_4326": list(transform_bounds(src.crs, "EPSG:4326", *bounds)),
                         "row_off": row_off,
                         "col_off": col_off,
                     }

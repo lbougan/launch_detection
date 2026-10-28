@@ -10,8 +10,13 @@ SPLITS = {"train": ["A"], "val": [], "test": ["B"]}
 
 
 def _chip(lon, lat, tile_id):
+    """Chip as chip_raster emits it: `bbox` in the raster CRS (UTM metres), plus `bbox_4326`."""
     d = 0.01
-    return {"tile_id": tile_id, "bbox": [lon - d, lat - d, lon + d, lat + d]}
+    return {
+        "tile_id": tile_id,
+        "bbox": [500_000.0, 4_000_000.0, 501_280.0, 4_001_280.0],
+        "bbox_4326": [lon - d, lat - d, lon + d, lat + d],
+    }
 
 
 def test_chips_near_a_held_out_site_go_with_it():
@@ -27,6 +32,12 @@ def test_chip_within_exclusion_radius_of_a_test_site_is_never_train():
     chips = [_chip(1.1, 0.0, "near_b")]  # ~11 km from B
     out = assign_splits(chips, SITES, SPLITS, exclusion_km=20.0)
     assert out[0]["split"] == "test"
+
+
+def test_projected_bbox_is_not_read_as_lonlat():
+    # Every chip has the same UTM `bbox`; only `bbox_4326` tells them apart.
+    out = assign_splits([_chip(0.0, 0.0, "a0"), _chip(1.0, 0.0, "b0")], SITES, SPLITS)
+    assert [c["split"] for c in out] == ["train", "test"]
 
 
 def test_inputs_are_not_mutated():

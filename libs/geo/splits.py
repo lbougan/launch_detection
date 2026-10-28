@@ -44,7 +44,8 @@ def assign_splits(
     site_split = _site_split_map(sites, splits)
     out = []
     for chip in chips:
-        lon, lat = _centroid(chip["bbox"])
+        # `bbox` is in the raster CRS (UTM for Sentinel-2); site distances need lon/lat.
+        lon, lat = _centroid(chip["bbox_4326"])
         nearest, d_km = _nearest_site(lon, lat, sites)
         split = site_split[nearest["name"]] if d_km <= exclusion_km else "train"
         out.append({**chip, "split": split})

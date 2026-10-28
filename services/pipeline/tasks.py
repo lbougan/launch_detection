@@ -7,25 +7,13 @@ import logging
 import os
 from pathlib import Path
 
-import rasterio
 from prefect import task
-from sqlalchemy import create_engine, text
 
 from libs.config import settings
-from libs.features.indices import build_temporal_composite
-from libs.features.stats import compute_channel_stats, load_stats, save_stats
-from libs.geo.bandspec import write_bandspec
-from libs.geo.chips import chip_raster, load_known_sites
-from libs.geo.labels import build_label_mask, write_label
-from libs.geo.postprocess import (
-    deduplicate_detections,
-    detections_to_geodataframe,
-    score_detections,
-    threshold_and_extract,
-)
-from libs.geo.splits import assign_splits
-from libs.inference.sliding_window import run_sliding_window
-from libs.stac.client import ingest_aoi
+
+# Heavy dependencies (rasterio, sqlalchemy, geopandas, the STAC client, torch via the
+# training/inference modules) are imported inside each task, so that importing the flows
+# (e.g. to register a deployment) stays cheap and never pulls in torch.
 
 TRITON_URL = os.environ.get("TRITON_URL", "")
 
@@ -61,6 +49,8 @@ def ingest_aoi_task(
     max_cloud_cover: float = 20.0,
 ) -> list[str]:
     """Ingest satellite imagery for a single AOI."""
+    from libs.stac.client import ingest_aoi
+
     paths = ingest_aoi(
         bbox=bbox,
         date_range=date_range,
@@ -77,6 +67,11 @@ def build_composite_task(
     method: str = "median",
 ) -> str:
     """Build a temporal composite from multiple scenes."""
+    import rasterio
+
+    from libs.features.indices import build_temporal_composite
+    from libs.geo.bandspec import write_bandspec
+
     paths = [Path(p) for p in scene_paths]
     if not paths:
         raise ValueError("No scenes to composite")
@@ -97,6 +92,8 @@ def build_composite_task(
 @task(name="compute-stats")
 def compute_stats_task(composite_paths: list[str], output_path: str) -> str:
     """Compute global per-channel normalisation stats over the given composites."""
+    from libs.features.stats import compute_channel_stats, save_stats
+
     stats = compute_channel_stats([Path(p) for p in composite_paths])
     save_stats(stats, Path(output_path))
     logger.info("Wrote channel stats (%d samples) -> %s", stats["n_samples"], output_path)
@@ -111,6 +108,8 @@ def tile_composite_task(
     overlap: int = 32,
 ) -> list[dict]:
     """Chip a composite raster into ML-ready tiles."""
+    from libs.geo.chips import chip_raster
+
     chips = chip_raster(
         raster_path=Path(composite_path),
         output_dir=Path(output_dir),
@@ -127,6 +126,9 @@ def assign_splits_task(
     splits_path: str,
 ) -> list[dict]:
     """Assign site-held-out train/val/test splits to chips."""
+    from libs.geo.chips import load_known_sites
+    from libs.geo.splits import assign_splits
+
     sites = load_known_sites(Path(known_sites_path))
     splits = json.loads(Path(splits_path).read_text())
     return assign_splits(chip_manifest, sites, splits, exclusion_km=float(splits["exclusion_km"]))
@@ -138,6 +140,11 @@ def build_labels_task(
     known_sites_path: str,
 ) -> list[dict]:
     """Generate weak label masks for chips (splits are assigned upstream)."""
+    import rasterio
+
+    from libs.geo.chips import load_known_sites
+    from libs.geo.labels import build_label_mask, write_label
+
     sites = load_known_sites(Path(known_sites_path))
     enriched = [dict(chip) for chip in chip_manifest]
 
@@ -165,6 +172,9 @@ def run_inference_task(
     device: str = "cpu",
 ) -> str:
     """Run sliding-window inference over a raster with a local or Triton predictor."""
+    from libs.features.stats import load_stats
+    from libs.inference.sliding_window import run_sliding_window
+
     if serving_mode == "triton":
         from libs.inference.predictors import TritonPredictor
 
@@ -208,6 +218,13 @@ def postprocess_task(
     dedupe_eps_m: float = 2000.0,
 ) -> list[dict]:
     """Extract, score, and deduplicate detections from probability raster."""
+    from libs.geo.postprocess import (
+        deduplicate_detections,
+        detections_to_geodataframe,
+        score_detections,
+        threshold_and_extract,
+    )
+
     detections = threshold_and_extract(prob_raster_path, threshold, min_area_px)
     detections = score_detections(detections)
     detections = deduplicate_detections(detections, method=dedupe_method, eps_m=dedupe_eps_m)
@@ -241,6 +258,8 @@ def store_detections_task(
     probability. `evidence` carries what the thumbnail endpoint needs to render:
     the composite path and the detection's EPSG:4326 envelope.
     """
+    from sqlalchemy import create_engine, text
+
     engine = create_engine(db_url or settings.database_url)
     features = geojson.get("features", [])
 
@@ -287,6 +306,10 @@ def seed_known_sites_task(known_sites_path: str, db_url: str | None = None) -> i
 
     Returns the number of newly inserted sites.
     """
+    from sqlalchemy import create_engine, text
+
+    from libs.geo.chips import load_known_sites
+
     sites = load_known_sites(Path(known_sites_path))
     engine = create_engine(db_url or settings.database_url)
     inserted = 0
