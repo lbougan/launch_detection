@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
 from typing import Any
 
 import pytorch_lightning as pl
@@ -10,6 +12,8 @@ from torchmetrics import AUROC, F1Score, Precision, Recall
 
 from services.training.losses import CombinedLoss
 from services.training.model import build_deeplabv3plus, build_unet
+
+logger = logging.getLogger(__name__)
 
 
 class LaunchSiteSegModule(pl.LightningModule):
@@ -22,6 +26,7 @@ class LaunchSiteSegModule(pl.LightningModule):
         self,
         model_type: str = "unet",
         encoder_name: str = "resnet34",
+        encoder_weights: str | None = "imagenet",
         in_channels: int = 10,
         lr: float = 1e-3,
         weight_decay: float = 1e-4,
@@ -29,14 +34,19 @@ class LaunchSiteSegModule(pl.LightningModule):
         focal_gamma: float = 2.0,
         dice_weight: float = 0.5,
         scheduler_patience: int = 5,
+        stats_path: str = "data/manifests/stats.json",
+        known_sites_path: str = "data/manifests/known_sites.json",
+        splits_path: str = "data/manifests/splits.json",
+        val_composites: list[str] | None = None,
     ):
         super().__init__()
+        val_composites = list(val_composites or [])
         self.save_hyperparameters()
 
         if model_type == "unet":
-            self.model = build_unet(in_channels, 1, encoder_name)
+            self.model = build_unet(in_channels, 1, encoder_name, encoder_weights)
         elif model_type == "deeplabv3+":
-            self.model = build_deeplabv3plus(in_channels, 1, encoder_name)
+            self.model = build_deeplabv3plus(in_channels, 1, encoder_name, encoder_weights)
         else:
             raise ValueError(f"Unknown model_type: {model_type}")
 
@@ -87,6 +97,42 @@ class LaunchSiteSegModule(pl.LightningModule):
         self.val_precision.reset()
         self.val_recall.reset()
         self.val_auroc.reset()
+        self._log_site_metrics()
+
+    def _log_site_metrics(self) -> None:
+        """Log val/site_recall@10 every epoch (0.0 without val composites) for the checkpoint monitor."""
+        recall, fp = 0.0, 0.0
+        if self.hparams.val_composites:
+            try:
+                recall, fp = self._site_metrics()
+            except Exception:
+                logger.warning("site-level validation failed; logging 0.0", exc_info=True)
+        self.log("val/site_recall@10", recall, prog_bar=True)
+        self.log("val/fp_per_1000km2", fp)
+
+    def _site_metrics(self) -> tuple[float, float]:
+        import json
+        import tempfile
+
+        from libs.geo.chips import load_known_sites
+        from libs.inference.predictors import LocalTorchPredictor
+        from services.training.evaluate import evaluate_composites
+
+        comps = [Path(c) for c in self.hparams.val_composites]
+        missing = [c for c in comps if not c.exists()]
+        if missing:
+            raise FileNotFoundError(f"val composites missing: {missing}")
+        splits = json.loads(Path(self.hparams.splits_path).read_text())
+        names = set(splits["val"])
+        sites = [
+            s for s in load_known_sites(Path(self.hparams.known_sites_path)) if s["name"] in names
+        ]
+        predictor = LocalTorchPredictor(self, device=str(self.device))
+        with tempfile.TemporaryDirectory() as tmp:
+            res = evaluate_composites(
+                predictor, comps, Path(self.hparams.stats_path), sites, Path(tmp), "val"
+            )
+        return res.recall_at_10, res.fp_per_1000km2
 
     def configure_optimizers(self) -> dict:
         optimizer = torch.optim.AdamW(

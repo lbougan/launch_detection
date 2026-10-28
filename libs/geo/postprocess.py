@@ -2,30 +2,37 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import geopandas as gpd
 import numpy as np
 import rasterio
 from rasterio.features import shapes as rasterio_shapes
+from rasterio.warp import transform as warp_transform
 from scipy.ndimage import label as scipy_label
 from shapely.geometry import MultiPolygon, Polygon, shape
 from shapely.ops import unary_union
 from sklearn.cluster import DBSCAN
 
+from libs.geo.projection import local_aeqd
+
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(frozen=True)
 class Detection:
-    geometry: Polygon
-    score: float
+    """A candidate site. `prob` is the model's calibrated-ish confidence; `rank_score` orders."""
+
+    geometry: Polygon | None
+    prob: float
+    rank_score: float | None
     area_km2: float
     compactness: float
     centroid_lon: float
     centroid_lat: float
-    evidence: dict = field(default_factory=dict)
+    evidence: dict
 
 
 def threshold_and_extract(
@@ -45,6 +52,9 @@ def threshold_and_extract(
     with rasterio.open(prob_raster_path) as src:
         prob = src.read(1)
         transform = src.transform
+        crs = src.crs
+        if crs is None or not crs.is_projected:
+            raise ValueError(f"{prob_raster_path} must be in a projected (metric) CRS, got {crs}")
         pixel_area_m2 = abs(transform.a * transform.e)
 
     binary = (prob >= threshold).astype(np.uint8)
@@ -77,20 +87,22 @@ def threshold_and_extract(
         area_km2 = area_px * pixel_area_m2 / 1e6
         compactness = _compactness(merged)
         centroid = merged.centroid
+        (lon,), (lat,) = warp_transform(crs, "EPSG:4326", [centroid.x], [centroid.y])
 
         detections.append(
             Detection(
                 geometry=merged,
-                score=mean_prob,
+                prob=mean_prob,
+                rank_score=None,
                 area_km2=area_km2,
                 compactness=compactness,
-                centroid_lon=centroid.x,
-                centroid_lat=centroid.y,
+                centroid_lon=float(lon),
+                centroid_lat=float(lat),
                 evidence={"mean_prob": mean_prob, "area_px": int(area_px)},
             )
         )
 
-    detections.sort(key=lambda d: d.score, reverse=True)
+    detections.sort(key=lambda d: d.prob, reverse=True)
     logger.info("Extracted %d candidate detections (min_area=%dpx)", len(detections), min_area_px)
     return detections
 
@@ -105,7 +117,7 @@ def _compactness(polygon: Polygon) -> float:
 def deduplicate_detections(
     detections: list[Detection],
     method: str = "dbscan",
-    eps_deg: float = 0.02,
+    eps_m: float = 2000.0,
     iou_threshold: float = 0.3,
 ) -> list[Detection]:
     """Merge overlapping/nearby detections.
@@ -113,34 +125,43 @@ def deduplicate_detections(
     Args:
         detections: Candidate detections (already scored).
         method: "dbscan" (cluster by centroid distance) or "iou" (merge by overlap).
-        eps_deg: DBSCAN epsilon in degrees (~2 km at mid-latitudes).
+        eps_m: DBSCAN epsilon in metres, applied in a local azimuthal equidistant frame.
         iou_threshold: IoU threshold for merging (only for "iou" method).
 
     Returns:
-        Deduplicated detections, one per cluster (highest score kept).
+        Deduplicated detections, one per cluster (highest rank_score kept).
     """
     if not detections:
         return []
 
     if method == "dbscan":
-        return _dedupe_dbscan(detections, eps_deg)
+        return _dedupe_dbscan(detections, eps_m)
     elif method == "iou":
         return _dedupe_iou(detections, iou_threshold)
     else:
         raise ValueError(f"Unknown dedupe method: {method}")
 
 
-def _dedupe_dbscan(detections: list[Detection], eps_deg: float) -> list[Detection]:
-    coords = np.array([[d.centroid_lon, d.centroid_lat] for d in detections])
-    clustering = DBSCAN(eps=eps_deg, min_samples=1, metric="euclidean").fit(coords)
+def _rank_key(d: Detection) -> float:
+    return d.rank_score if d.rank_score is not None else d.prob
+
+
+def _dedupe_dbscan(detections: list[Detection], eps_m: float) -> list[Detection]:
+    """Cluster centroids in metres (local AEQD centred on the mean; fine for one AOI)."""
+    lons = np.array([d.centroid_lon for d in detections])
+    lats = np.array([d.centroid_lat for d in detections])
+    crs = local_aeqd(float(lons.mean()), float(lats.mean()))
+    xs, ys = warp_transform("EPSG:4326", crs, lons.tolist(), lats.tolist())
+    coords = np.column_stack([xs, ys])
+    clustering = DBSCAN(eps=eps_m, min_samples=1, metric="euclidean").fit(coords)
 
     cluster_best: dict[int, Detection] = {}
     for det, label in zip(detections, clustering.labels_, strict=True):
-        if label not in cluster_best or det.score > cluster_best[label].score:
+        if label not in cluster_best or _rank_key(det) > _rank_key(cluster_best[label]):
             cluster_best[label] = det
 
-    result = sorted(cluster_best.values(), key=lambda d: d.score, reverse=True)
-    logger.info("DBSCAN dedupe: %d → %d detections", len(detections), len(result))
+    result = sorted(cluster_best.values(), key=_rank_key, reverse=True)
+    logger.info("DBSCAN dedupe: %d -> %d detections", len(detections), len(result))
     return result
 
 
@@ -173,42 +194,50 @@ def score_detections(
     area_weight: float = 0.2,
     ideal_area_km2: float = 2.0,
 ) -> list[Detection]:
-    """Re-score detections with a composite score.
+    """Return new detections with a composite `rank_score` (`prob` is left untouched).
 
     Combines model probability, shape compactness, and area prior.
     """
+    scored = []
     for det in detections:
         area_score = 1.0 - min(abs(det.area_km2 - ideal_area_km2) / ideal_area_km2, 1.0)
         composite = (
-            prob_weight * det.score
-            + compactness_weight * det.compactness
-            + area_weight * area_score
+            prob_weight * det.prob + compactness_weight * det.compactness + area_weight * area_score
         )
-        det.score = composite
-        det.evidence["composite_score_breakdown"] = {
-            "prob": det.evidence.get("mean_prob", det.score),
+        breakdown = {
+            "prob": det.prob,
             "compactness": det.compactness,
             "area_score": area_score,
         }
+        scored.append(
+            dataclasses.replace(
+                det,
+                rank_score=composite,
+                evidence={**det.evidence, "rank_breakdown": breakdown},
+            )
+        )
 
-    detections.sort(key=lambda d: d.score, reverse=True)
-    return detections
+    return sorted(scored, key=lambda d: d.rank_score, reverse=True)
 
 
 def detections_to_geodataframe(detections: list[Detection]) -> gpd.GeoDataFrame:
     """Convert detections to a GeoDataFrame for storage or visualization."""
     if not detections:
-        return gpd.GeoDataFrame(columns=["geometry", "score", "area_km2", "compactness"])
+        return gpd.GeoDataFrame(
+            columns=["geometry", "prob", "rank_score", "area_km2", "compactness", "rank_breakdown"]
+        )
 
     return gpd.GeoDataFrame(
         [
             {
                 "geometry": d.geometry,
-                "score": d.score,
+                "prob": d.prob,
+                "rank_score": d.rank_score,
                 "area_km2": d.area_km2,
                 "compactness": d.compactness,
                 "centroid_lon": d.centroid_lon,
                 "centroid_lat": d.centroid_lat,
+                "rank_breakdown": d.evidence.get("rank_breakdown", {}),
             }
             for d in detections
         ],
