@@ -34,6 +34,8 @@ def get_vector_tile(
             SELECT
                 -- A site polygon is sub-pixel at low zoom and ST_AsMVTGeom drops it;
                 -- fall back to its centroid so the site still shows as a point.
+                -- The layer therefore mixes polygons and centroid points (small sites at
+                -- low zoom): a map needs a circle layer filtered on geometry-type Point.
                 COALESCE(
                     ST_AsMVTGeom(ST_Transform(d.geom, 3857), bounds.geom_3857),
                     ST_AsMVTGeom(ST_Transform(ST_Centroid(d.geom), 3857), bounds.geom_3857)

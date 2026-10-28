@@ -98,7 +98,10 @@ def get_evidence_thumbnail(
         raise HTTPException(status_code=404, detail="Evidence imagery not available")
 
     with rasterio.open(composite_path) as src:
-        names = read_bandspec(src).names
+        try:
+            names = read_bandspec(src).names
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="Composite has no band spec") from exc
         missing = [b for b in MODE_BANDS[mode] if b not in names]
         if missing:
             raise HTTPException(

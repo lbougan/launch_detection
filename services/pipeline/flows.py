@@ -195,7 +195,10 @@ def scan_and_detect_flow(
     Returns:
         Total number of stored detections.
     """
-    seed_known_sites_task(known_sites_path)
+    if Path(known_sites_path).exists():
+        seed_known_sites_task(known_sites_path)
+    else:
+        logger.warning("Known-sites manifest %s not found; skipping seeding", known_sites_path)
 
     if not serving_mode:
         serving_mode = "triton" if os.environ.get("TRITON_URL") else "local"

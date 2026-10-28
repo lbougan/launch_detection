@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,10 @@ from tests.fixtures.synthetic import make_synthetic_composite, site_lonlat
 pytestmark = pytest.mark.api
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SCHEMA_PATH = REPO_ROOT / "infra" / "postgres-init" / "001_schema.sql"
+
+
 def _db_available() -> bool:
     try:
         with create_engine(settings.database_url).connect() as conn:
@@ -25,15 +30,43 @@ def _db_available() -> bool:
         return False
 
 
+def _ensure_database(name: str) -> None:
+    """CREATE DATABASE `name` on the configured server unless it exists."""
+    admin = create_engine(settings.database_url, isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as conn:
+            exists = conn.execute(
+                text("select 1 from pg_database where datname = :n"), {"n": name}
+            ).scalar()
+            if not exists:
+                conn.execute(text(f'CREATE DATABASE "{name}"'))
+    finally:
+        admin.dispose()
+
+
 @pytest.fixture(scope="session")
 def engine():
+    """Engine on `<postgres_db>_test`; the app and pipeline settings point there too.
+
+    The configured database itself is never touched beyond the existence check.
+    """
     if not _db_available():
+        if os.environ.get("CI"):
+            pytest.fail("PostGIS not reachable in CI")
         pytest.skip("PostGIS not reachable at settings.database_url")
-    eng = create_engine(settings.database_url)
-    schema = Path("infra/postgres-init/001_schema.sql").read_text()
-    with eng.begin() as conn:
-        conn.execute(text(schema))
-    return eng
+    from services.api.database import get_engine
+
+    test_db = f"{settings.postgres_db}_test"
+    _ensure_database(test_db)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(settings, "postgres_db", test_db)
+        get_engine.cache_clear()
+        eng = create_engine(settings.database_url)
+        with eng.begin() as conn:
+            conn.execute(text(SCHEMA_PATH.read_text()))
+        yield eng
+        eng.dispose()
+        get_engine.cache_clear()
 
 
 @pytest.fixture
@@ -87,7 +120,7 @@ def seeded(clean_db, tmp_path):
             ),
             {"x": lon, "y": lat},
         )
-    return {"lon": lon, "lat": lat, "composite": comp_path}
+    return {"lon": lon, "lat": lat, "composite": comp_path, "engine": clean_db}
 
 
 @pytest.fixture

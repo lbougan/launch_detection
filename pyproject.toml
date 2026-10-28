@@ -78,7 +78,7 @@ pythonpath = ["."]
 python_files = ["test_*.py"]
 markers = [
     "integration: synthetic end-to-end run on CPU (~1-2 min)",
-    "api: needs a PostGIS database (DATABASE_URL)",
+    "api: needs a reachable PostGIS (POSTGRES_* env); uses <db>_test",
     "slow: skipped unless --run-slow",
 ]
 addopts = "-m 'not api' --strict-markers"
