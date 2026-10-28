@@ -27,7 +27,7 @@ from libs.geo.postprocess import (
     score_detections,
     threshold_and_extract,
 )
-from libs.geo.tiling import build_dataset_split
+from libs.geo.splits import assign_splits
 from libs.stac.client import ingest_aoi
 from services.training.dataset import LaunchSiteDataset, collate
 from services.training.inference import load_model, sliding_window_inference
@@ -184,14 +184,26 @@ def tile_composite_task(
     return chips
 
 
+@task(name="assign-splits")
+def assign_splits_task(
+    chip_manifest: list[dict],
+    known_sites_path: str,
+    splits_path: str,
+) -> list[dict]:
+    """Assign site-held-out train/val/test splits to chips."""
+    sites = load_known_sites(Path(known_sites_path))
+    splits = json.loads(Path(splits_path).read_text())
+    return assign_splits(chip_manifest, sites, splits, exclusion_km=float(splits["exclusion_km"]))
+
+
 @task(name="build-labels")
 def build_labels_task(
     chip_manifest: list[dict],
     known_sites_path: str,
 ) -> list[dict]:
-    """Generate weak label masks and dataset splits."""
+    """Generate weak label masks for chips (splits are assigned upstream)."""
     sites = load_known_sites(Path(known_sites_path))
-    enriched = build_dataset_split(chip_manifest, sites)
+    enriched = [dict(chip) for chip in chip_manifest]
 
     for chip in enriched:
         with rasterio.open(chip["path"]) as src:

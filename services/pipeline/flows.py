@@ -10,7 +10,10 @@ from pathlib import Path
 from prefect import flow
 
 from libs.config import default_stats_path, settings
+from libs.geo.chips import load_known_sites
+from libs.geo.splits import aoi_split, count_by_split
 from services.pipeline.tasks import (
+    assign_splits_task,
     build_composite_task,
     build_labels_task,
     compute_stats_task,
@@ -33,6 +36,7 @@ def ingest_and_preprocess_flow(
     aoi_config_path: str = "data/manifests/aoi_config.json",
     date_range: str = "2024-01-01/2024-06-30",
     known_sites_path: str = "data/manifests/known_sites.json",
+    splits_path: str = "data/manifests/splits.json",
     max_cloud_cover: float = 20.0,
 ) -> str:
     """Flow 1: Ingest imagery, build composites, tile, and create labels.
@@ -44,7 +48,10 @@ def ingest_and_preprocess_flow(
 
     data_dir = Path(settings.data_dir)
     all_chips = []
-    composite_paths: list[str] = []
+    training_composites: list[str] = []
+    sites = load_known_sites(Path(known_sites_path))
+    with open(splits_path) as f:
+        splits = json.load(f)
 
     for aoi in aoi_config["aois"]:
         aoi_name = aoi["name"]
@@ -69,7 +76,8 @@ def ingest_and_preprocess_flow(
             output_path=str(data_dir / "composites" / f"{aoi_name}_composite.tif"),
         )
 
-        composite_paths.append(composite_path)
+        if aoi_split(aoi, sites, splits) == "train":
+            training_composites.append(composite_path)
 
         chips = tile_composite_task(
             composite_path=composite_path,
@@ -80,20 +88,31 @@ def ingest_and_preprocess_flow(
             chip["aoi"] = aoi_name
         all_chips.extend(chips)
 
-    if composite_paths:
-        compute_stats_task(
-            composite_paths=composite_paths,
-            output_path=str(default_stats_path()),
-        )
-
-    labeled_chips = build_labels_task(
+    split_chips = assign_splits_task(
         chip_manifest=all_chips,
         known_sites_path=known_sites_path,
+        splits_path=splits_path,
     )
+    logger.info("Chips per split: %s", count_by_split(split_chips))
+
+    labeled_chips = build_labels_task(
+        chip_manifest=split_chips,
+        known_sites_path=known_sites_path,
+    )
+
+    stats_path = str(default_stats_path())
+    if training_composites:
+        compute_stats_task(
+            composite_paths=training_composites,
+            output_path=stats_path,
+        )
+    else:
+        logger.warning("No training composites; channel stats not computed")
 
     manifest_path = str(data_dir / "manifests" / "chip_manifest.json")
     with open(manifest_path, "w") as f:
         json.dump(labeled_chips, f, indent=2)
+    logger.info("stats_path=%s splits_path=%s", stats_path, splits_path)
 
     print(f"Created chip manifest with {len(labeled_chips)} tiles → {manifest_path}")
     return manifest_path
