@@ -13,8 +13,9 @@ import numpy as np
 import planetary_computer as pc
 import pystac_client
 import rasterio
-from pyproj import Transformer
+from rasterio.crs import CRS
 from rasterio.enums import Resampling
+from rasterio.warp import transform_bounds
 from rasterio.windows import from_bounds
 
 from libs.geo.bandspec import S2_BAND_NAMES, TAG_KEY, BandSpec, write_bandspec
@@ -33,8 +34,6 @@ STAC_API_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
 SENTINEL2_COLLECTION = "sentinel-2-l2a"
 
 S2_BANDS = ["B02", "B03", "B04", "B08", "B11", "B12"]
-# L2A digital numbers per reflectance unit; the per-band scale/offset from STAC take precedence
-S2_REFLECTANCE_SCALE = 10_000.0
 DEFAULT_SCALE_OFFSET = (1e-4, 0.0)
 # ESA added a +1000 DN offset from processing baseline 04.00 (25 Jan 2022)
 BASELINE_OFFSET_FROM = 4.0
@@ -131,13 +130,14 @@ def search_sentinel2(
 def _bbox_to_native(
     target_bbox: list[float], src_crs: rasterio.crs.CRS
 ) -> tuple[float, float, float, float]:
-    """Reproject bbox from EPSG:4326 to the raster's native CRS."""
-    west, south, east, north = target_bbox
-    if src_crs and src_crs.to_epsg() != 4326:
-        transformer = Transformer.from_crs("EPSG:4326", src_crs, always_xy=True)
-        west, south = transformer.transform(west, south)
-        east, north = transformer.transform(east, north)
-    return west, south, east, north
+    """Reproject bbox from EPSG:4326 to the raster's native CRS.
+
+    The edges are densified, so the native box encloses the whole lon/lat box (at high latitude
+    its edges bulge in UTM and the two corners alone would clip the crop).
+    """
+    if not src_crs or src_crs == CRS.from_epsg(4326):
+        return tuple(target_bbox)
+    return transform_bounds("EPSG:4326", src_crs, *target_bbox, densify_pts=21)
 
 
 def _read_band(

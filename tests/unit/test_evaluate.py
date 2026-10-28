@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 
 from services.training.evaluate import (
@@ -51,3 +52,12 @@ def test_update_readme_raises_on_missing_markers(tmp_path):
 def test_scanned_area_of_small_composite(small_composite):
     path, _ = small_composite
     assert scanned_area_km2([path]) == pytest.approx(10.24)
+
+
+def test_scanned_area_excludes_nodata_pixels(tmp_path):
+    from tests.fixtures.synthetic import make_reflectance_cube, write_composite
+
+    cube = make_reflectance_cube(320, 320, 160, 160, 24)
+    cube[:, :160, :] = np.nan  # top half has no data
+    path = write_composite(tmp_path / "half.tif", cube)
+    assert scanned_area_km2([path]) == pytest.approx(10.24 / 2)

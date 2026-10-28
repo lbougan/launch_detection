@@ -25,3 +25,13 @@ def test_detail_has_geojson(client, seeded):
     r = client.get(f"/detections/{first}")
     assert r.status_code == 200 and r.json()["geojson"]["type"] == "Polygon"
     assert client.get("/detections/999999").status_code == 404
+
+
+def test_composite_path_is_not_exposed_but_thumbnail_still_works(client, seeded):
+    listed = client.get("/detections").json()["detections"]
+    assert all("composite_path" not in d["evidence"] for d in listed)
+    top = listed[0]
+    assert top["evidence"]["model_version"] == "test", "the rest of the evidence is kept"
+    assert "composite_path" not in client.get(f"/detections/{top['id']}").json()["evidence"]
+    r = client.get(f"/evidence/{top['id']}/thumbnail", params={"width": 64, "height": 64})
+    assert r.status_code == 200

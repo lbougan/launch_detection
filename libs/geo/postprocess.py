@@ -9,6 +9,8 @@ from dataclasses import dataclass
 import geopandas as gpd
 import numpy as np
 import rasterio
+import shapely
+from pyproj import Transformer
 from rasterio.features import shapes as rasterio_shapes
 from rasterio.warp import transform as warp_transform
 from scipy.ndimage import label as scipy_label
@@ -23,7 +25,11 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Detection:
-    """A candidate site. `prob` is the model's calibrated-ish confidence; `rank_score` orders."""
+    """A candidate site. `prob` is the model's calibrated-ish confidence; `rank_score` orders.
+
+    `geometry` is in EPSG:4326 (lon/lat); `area_km2` and `compactness` were computed in the
+    probability raster's projected CRS.
+    """
 
     geometry: Polygon | None
     prob: float
@@ -46,8 +52,8 @@ def threshold_and_extract(
       1. Threshold to binary
       2. Connected components
       3. Polygonize each component
-      4. Compute geometric features
-      5. Score and return sorted detections
+      4. Compute geometric features (in the raster's projected CRS)
+      5. Reproject each polygon to EPSG:4326 and return detections sorted by prob
     """
     with rasterio.open(prob_raster_path) as src:
         prob = src.read(1)
@@ -56,6 +62,7 @@ def threshold_and_extract(
         if crs is None or not crs.is_projected:
             raise ValueError(f"{prob_raster_path} must be in a projected (metric) CRS, got {crs}")
         pixel_area_m2 = abs(transform.a * transform.e)
+    to_lonlat = Transformer.from_crs(crs, "EPSG:4326", always_xy=True).transform
 
     binary = (prob >= threshold).astype(np.uint8)
     labeled, n_components = scipy_label(binary)
@@ -85,13 +92,13 @@ def threshold_and_extract(
             merged = max(merged.geoms, key=lambda g: g.area)
 
         area_km2 = area_px * pixel_area_m2 / 1e6
-        compactness = _compactness(merged)
+        compactness = _compactness(merged)  # metric, before reprojection
         centroid = merged.centroid
-        (lon,), (lat,) = warp_transform(crs, "EPSG:4326", [centroid.x], [centroid.y])
+        lon, lat = to_lonlat(centroid.x, centroid.y)
 
         detections.append(
             Detection(
-                geometry=merged,
+                geometry=shapely.transform(merged, to_lonlat, interleaved=False),
                 prob=mean_prob,
                 rank_score=None,
                 area_km2=area_km2,

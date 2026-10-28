@@ -33,6 +33,14 @@ _COLUMNS = (
 )
 
 
+# Server-side details kept in the DB for the thumbnail endpoint but never sent to clients.
+_PRIVATE_EVIDENCE_KEYS = frozenset({"composite_path"})
+
+
+def _public_evidence(evidence: dict | None) -> dict:
+    return {k: v for k, v in (evidence or {}).items() if k not in _PRIVATE_EVIDENCE_KEYS}
+
+
 def _row_to_out(row) -> DetectionOut:
     return DetectionOut(
         id=row.id,
@@ -41,7 +49,7 @@ def _row_to_out(row) -> DetectionOut:
         model_version=row.model_version,
         area_km2=row.area_km2,
         compactness=row.compactness,
-        evidence=row.evidence or {},
+        evidence=_public_evidence(row.evidence),
         centroid_lon=row.centroid_lon,
         centroid_lat=row.centroid_lat,
         bbox=[row.xmin, row.ymin, row.xmax, row.ymax],

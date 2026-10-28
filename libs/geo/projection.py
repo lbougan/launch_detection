@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
-
 from pyproj import CRS, Geod, Transformer
 from shapely.geometry import Point, Polygon
 from shapely.ops import transform as shp_transform
@@ -11,7 +9,6 @@ from shapely.ops import transform as shp_transform
 _GEOD = Geod(ellps="WGS84")
 
 
-@lru_cache(maxsize=256)
 def local_aeqd(lon: float, lat: float) -> CRS:
     """Azimuthal equidistant CRS centred on (lon, lat): metres, true distances from the centre."""
     return CRS.from_proj4(f"+proj=aeqd +lat_0={lat} +lon_0={lon} +datum=WGS84 +units=m +no_defs")

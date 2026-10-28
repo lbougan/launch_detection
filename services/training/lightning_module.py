@@ -100,17 +100,17 @@ class LaunchSiteSegModule(pl.LightningModule):
         self._log_site_metrics()
 
     def _log_site_metrics(self) -> None:
-        """Log val/site_recall@10 every epoch (0.0 without val composites) for the checkpoint monitor."""
-        if self.trainer.sanity_checking:
+        """Log val/site_recall@10 every epoch (0.0 without val composites) for the checkpoint monitor.
+
+        Site-level evaluation is single-device: it runs and logs on global rank 0 only
+        (``rank_zero_only=True``, no ``sync_dist``). Failures propagate; a broken evaluation must
+        not silently log 0.0 into the checkpoint monitor.
+        """
+        if self.trainer.sanity_checking or not self.trainer.is_global_zero:
             return
-        recall, fp = 0.0, 0.0
-        if self.hparams.val_composites and self.trainer.is_global_zero:
-            try:
-                recall, fp = self._site_metrics()
-            except Exception:
-                logger.warning("site-level validation failed; logging 0.0", exc_info=True)
-        self.log("val/site_recall@10", recall, prog_bar=True, sync_dist=True)
-        self.log("val/fp_per_1000km2", fp, sync_dist=True)
+        recall, fp = self._site_metrics() if self.hparams.val_composites else (0.0, 0.0)
+        self.log("val/site_recall@10", recall, prog_bar=True, rank_zero_only=True, sync_dist=False)
+        self.log("val/fp_per_1000km2", fp, rank_zero_only=True, sync_dist=False)
 
     def _site_metrics(self) -> tuple[float, float]:
         import json

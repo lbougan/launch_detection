@@ -133,6 +133,20 @@ def test_postprocess_returns_one_feature_per_site(tmp_path: Path):
     assert fc["features"][0]["properties"]["prob"] == pytest.approx(0.9)
 
 
+def test_postprocess_feature_coordinates_are_lonlat(tmp_path: Path):
+    from pyproj import Transformer
+
+    fc = tasks.postprocess_task.fn(str(_write_prob(tmp_path / "p.tif", 0.9)))
+    ring = fc["features"][0]["geometry"]["coordinates"][0]
+    assert all(-180 <= x <= 180 and -90 <= y <= 90 for x, y in ring)
+    # blob centre: pixel (100, 100) of a 10 m grid at (500000, 4000000)
+    lon, lat = Transformer.from_crs(CRS_UTM33, "EPSG:4326", always_xy=True).transform(
+        501_000.0, 3_999_000.0
+    )
+    xs, ys = [x for x, _ in ring], [y for _, y in ring]
+    assert min(xs) < lon < max(xs) and min(ys) < lat < max(ys)
+
+
 def test_postprocess_empty_when_nothing_crosses_threshold(tmp_path: Path):
     fc = tasks.postprocess_task.fn(str(_write_prob(tmp_path / "p.tif", 0.2)))
     assert fc == {"type": "FeatureCollection", "features": []}

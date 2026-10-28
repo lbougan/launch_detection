@@ -96,7 +96,8 @@ The loss is focal (α 0.25, γ 2) plus 0.5 × soft Dice, both weighted per pixel
 contributes nothing; there is no label smoothing. AdamW (lr 1e-3, weight decay 1e-4),
 ReduceLROnPlateau, flips and 90° rotations. The checkpoint monitor is `val/site_recall@10` on the
 validation AOIs' composites (it falls back to `val/loss` when no validation composites are
-given), with early stopping on the same metric. See the [model card](docs/model-card.md).
+given), with early stopping on the same metric. Site-level validation runs on a single device
+(global rank 0) and fails the run if it breaks. See the [model card](docs/model-card.md).
 
 ```bash
 uv run python -m services.training.train_cli --manifest data/manifests/chip_manifest.json \
@@ -112,7 +113,8 @@ matches a site when its centroid is within 5 km.
 
 - **recall@K** (K = 5, 10, 20): the fraction of the split's sites matched by at least one of the
   K highest-ranked detections (ranked by `rank_score`).
-- **FP per 1000 km²**: detections that match no site, per 1000 km² of scanned composite.
+- **FP per 1000 km²**: detections that match no site, per 1000 km² of scanned composite (pixels
+  with data only).
 - **Reliability**: detections binned by `prob` (never `rank_score`), with the fraction of each bin
   that matches a site, to check whether the probability means what it says.
 
@@ -127,11 +129,13 @@ Results go to `out/eval/{val,test}.json`; `--update-readme` rewrites the Results
 
 There is one sliding window, `libs.inference.sliding_window.run_sliding_window`: 256 px windows
 with 64 px overlap, averaged in an `Accumulator`. `memmap=True` keeps the full-size sum and count
-maps on disk, so memory stays at one batch of tiles for any AOI size. The model sits behind a
+maps on disk, so memory stays at one batch of tiles for any AOI size. Pixels whose composite has
+no data (NaN) stay NaN in the probability raster. The model sits behind a
 `Predictor` protocol: `LocalTorchPredictor` (in-process PyTorch, any device) or `TritonPredictor`
 (NVIDIA Triton over gRPC). Postprocessing thresholds the probability raster, polygonises it,
 gives each polygon its mean `prob` and a `rank_score` (probability, compactness and an area
-prior) and merges detections within 2 km (DBSCAN in metres).
+prior) and merges detections within 2 km (DBSCAN in metres). Polygons are reprojected to
+EPSG:4326 for storage; area and compactness are measured in the composite's projected CRS.
 
 For Triton, `export_model` writes an ONNX model with a dynamic batch axis, validates it against
 PyTorch, embeds the normalisation stats and band spec in the ONNX metadata and copies the stats

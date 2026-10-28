@@ -62,3 +62,40 @@ def test_seed_known_sites_is_idempotent(clean_db, tmp_path):
         ("A", "XX", 2.0, 1.0),
         ("B", None, 4.0, 3.0),
     ]
+
+
+def test_real_postprocess_output_is_stored_at_the_planted_site(clean_db, tmp_path):
+    """End to end: probability raster (UTM) -> postprocess_task -> PostGIS, centroid in lon/lat."""
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+
+    from services.pipeline.tasks import postprocess_task
+    from tests.fixtures.synthetic import CRS_UTM33, GSD_M, PlantedSite, site_lonlat
+
+    prob = np.zeros((200, 200), dtype=np.float32)
+    prob[110:134, 60:84] = 0.9
+    site = PlantedSite(
+        row=122, col=72, size_px=24, x=500_000.0 + 72 * GSD_M, y=4_000_000.0 - 122 * GSD_M
+    )
+    path = tmp_path / "prob.tif"
+    profile = {
+        "driver": "GTiff",
+        "dtype": "float32",
+        "width": 200,
+        "height": 200,
+        "count": 1,
+        "crs": CRS_UTM33,
+        "transform": from_origin(500_000.0, 4_000_000.0, GSD_M, GSD_M),
+    }
+    with rasterio.open(path, "w", **profile) as dst:
+        dst.write(prob, 1)
+
+    fc = postprocess_task.fn(str(path))
+    assert store_detections_task.fn(fc, "v", composite_path="/c.tif", scan_date="2026-10-28") == 1
+    lon, lat = site_lonlat(site)
+    with clean_db.connect() as conn:
+        row = conn.execute(
+            text("select ST_X(ST_Centroid(geom)) x, ST_Y(ST_Centroid(geom)) y from detections")
+        ).one()
+    assert abs(row.x - lon) < 0.01 and abs(row.y - lat) < 0.01

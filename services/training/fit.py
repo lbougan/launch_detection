@@ -55,8 +55,16 @@ def fit(cfg: FitConfig) -> str:
     return fit_with_trainer(cfg)[0]
 
 
+def check_val_composites(paths: tuple[str, ...] | list[str]) -> None:
+    """Fail before training if any validation composite is missing."""
+    missing = [p for p in paths if not Path(p).exists()]
+    if missing:
+        raise FileNotFoundError(f"val composites missing: {', '.join(missing)}")
+
+
 def fit_with_trainer(cfg: FitConfig):
     """Train; return (best checkpoint path, the pl.Trainer) so callers can inspect metrics."""
+    check_val_composites(cfg.val_composites)
     import pytorch_lightning as pl
     from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
     from torch.utils.data import DataLoader

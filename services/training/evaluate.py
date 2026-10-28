@@ -15,6 +15,7 @@ from services.training.metrics import fp_per_1000km2, reliability_bins, site_rec
 
 logger = logging.getLogger(__name__)
 START_MARK, END_MARK = "<!-- EVAL:START -->", "<!-- EVAL:END -->"
+STRIP_ROWS = 1024  # rows per read when counting valid pixels
 
 
 @dataclass(frozen=True)
@@ -32,14 +33,23 @@ class EvalResult:
 
 
 def scanned_area_km2(composite_paths: list[Path]) -> float:
+    """Area of the pixels that hold data (band 1 not NaN), in km²; read in row strips."""
+    import numpy as np
     import rasterio
+    from rasterio.windows import Window
 
     total = 0.0
     for p in composite_paths:
         with rasterio.open(p) as src:
             if not src.crs.is_projected:
                 raise ValueError(f"{p} is not in a metric CRS")
-            total += abs(src.transform.a * src.transform.e) * src.width * src.height / 1e6
+            valid = 0
+            for r0 in range(0, src.height, STRIP_ROWS):
+                n = min(STRIP_ROWS, src.height - r0)
+                valid += int(
+                    np.count_nonzero(~np.isnan(src.read(1, window=Window(0, r0, src.width, n))))
+                )
+            total += abs(src.transform.a * src.transform.e) * valid / 1e6
     return total
 
 

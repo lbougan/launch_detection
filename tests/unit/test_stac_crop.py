@@ -63,3 +63,28 @@ def test_is_pipeline_crop(tmp_path):
         d.write(np.zeros((1, 2, 2), "uint16"))
     assert is_pipeline_crop(tagged)
     assert not is_pipeline_crop(plain)
+
+
+def test_bbox_to_native_is_densified_at_high_latitude():
+    from pyproj import Transformer
+    from rasterio.crs import CRS
+
+    from libs.stac.client import _bbox_to_native
+
+    bbox = [24.0, 69.0, 30.0, 71.0]  # northern Norway/Finland, UTM 35N
+    crs = CRS.from_epsg(32635)
+    tr = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
+    w2, s2 = tr.transform(bbox[0], bbox[1])
+    e2, n2 = tr.transform(bbox[2], bbox[3])
+    w, s, e, n = _bbox_to_native(bbox, crs)
+    assert w <= w2 and s <= s2 and e >= e2 and n >= n2
+    assert (e - w) > (e2 - w2) + 1_000, "the two-corner window misses the bulging edges"
+
+
+def test_bbox_to_native_is_identity_in_epsg4326():
+    from rasterio.crs import CRS
+
+    from libs.stac.client import _bbox_to_native
+
+    out = _bbox_to_native([10.0, 20.0, 11.0, 21.0], CRS.from_epsg(4326))
+    assert out == pytest.approx((10.0, 20.0, 11.0, 21.0))

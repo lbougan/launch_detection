@@ -42,6 +42,7 @@ def test_accumulator_memmap_equals_in_memory(tmp_path):
         a.add(r, c, t)
         b.add(r, c, t)
     np.testing.assert_allclose(a.finalize(), b.finalize(), atol=1e-6)
+    assert isinstance(b.finalize(), np.memmap), "memmap mode returns the disk-backed array"
     assert np.isnan(a.finalize()[11, 0]), "untouched pixels are NaN, not 0"
     b.close()
     assert list(tmp_path.iterdir()) == [], "close() removes the temp dir"
@@ -87,6 +88,28 @@ def test_run_sliding_window_small_raster_and_memmap(tmp_path):
     with rasterio.open(out) as src:
         assert (src.height, src.width) == (100, 120)
         np.testing.assert_allclose(src.read(1), 0.4, atol=1e-6)
+
+
+@pytest.mark.parametrize("memmap", [False, True])
+def test_nodata_block_in_composite_is_nan_in_prob_raster(tmp_path, memmap):
+    cube = make_reflectance_cube(300, 290, 150, 145, 20)
+    cube[:, :100, :120] = np.nan  # e.g. outside the swath
+    src_path = write_composite(tmp_path / "c.tif", cube)
+    out = run_sliding_window(
+        src_path,
+        tmp_path / "prob.tif",
+        FakePredictor(0.7),
+        _stats_for(src_path),
+        tile=128,
+        overlap=32,
+        memmap=memmap,
+        tmpdir=tmp_path,
+    )
+    with rasterio.open(out) as src:
+        prob = src.read(1)
+    assert np.isnan(prob[:100, :120]).all(), "no model output over nodata"
+    np.testing.assert_allclose(prob[100:, :], 0.7, atol=1e-6)
+    np.testing.assert_allclose(prob[:, 120:], 0.7, atol=1e-6)
 
 
 def _stats_for(path):

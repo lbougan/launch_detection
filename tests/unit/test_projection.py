@@ -30,3 +30,8 @@ def test_local_aeqd_is_centred():
     x, y = Transformer.from_crs("EPSG:4326", crs, always_xy=True).transform(10.0, 50.0)
     assert abs(x) < 1e-6 and abs(y) < 1e-6
     assert Point(x, y).equals_exact(Point(0, 0), 1e-6)
+
+
+def test_local_aeqd_is_not_cached_on_raw_floats():
+    assert not hasattr(local_aeqd, "cache_info")
+    assert local_aeqd(10.0, 20.0) == local_aeqd(10.0, 20.0)

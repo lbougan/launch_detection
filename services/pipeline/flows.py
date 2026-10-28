@@ -91,9 +91,7 @@ def ingest_and_preprocess_flow(
             output_dir=str(data_dir / "tiles" / aoi_name),
         )
 
-        for chip in chips:
-            chip["aoi"] = aoi_name
-        all_chips.extend(chips)
+        all_chips.extend({**chip, "aoi": aoi_name} for chip in chips)
 
     split_chips = assign_splits_task(
         chip_manifest=all_chips,

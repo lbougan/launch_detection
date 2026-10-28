@@ -75,3 +75,15 @@ def test_dedupe_uses_metres():
     c = dataclasses.replace(a, prob=0.7, rank_score=0.7, centroid_lat=62.9271 + 0.03)
     out = deduplicate_detections([a, b, c], eps_m=2000.0)
     assert [d.prob for d in out] == [0.9, 0.7]
+
+
+def test_extracted_polygon_is_lonlat_and_matches_the_centroid(tmp_path):
+    """Detection.geometry is EPSG:4326 (the store and the API stamp SRID 4326 on it)."""
+    d = threshold_and_extract(_prob_raster(tmp_path), threshold=0.5, min_area_px=10)[0]
+    minx, miny, maxx, maxy = d.geometry.bounds
+    assert -180 <= minx <= maxx <= 180 and -90 <= miny <= maxy <= 90
+    c = d.geometry.centroid
+    assert abs(c.x - d.centroid_lon) < 1e-4 and abs(c.y - d.centroid_lat) < 1e-4
+    assert maxx - minx < 0.01, "a 100 m blob spans well under 0.01 deg"
+    assert d.area_km2 == 0.01, "area comes from projected pixels, not degrees"
+    assert 0.7 < d.compactness < 0.8, "square Polsby-Popper (pi/4) on the projected polygon"
