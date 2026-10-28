@@ -64,3 +64,9 @@ def test_missing_site_raises():
 def test_unknown_split_key_raises():
     with pytest.raises(ValueError, match="unknown split keys"):
         assign_splits([], SITES, {"train": ["A"], "vall": ["B"]})
+
+
+def test_manifest_without_bbox_4326_is_rejected():
+    old = {"tile_id": "t", "bbox": [500_000.0, 4_000_000.0, 501_280.0, 4_001_280.0]}
+    with pytest.raises(ValueError, match="predates bbox_4326"):
+        assign_splits([old], SITES, SPLITS)

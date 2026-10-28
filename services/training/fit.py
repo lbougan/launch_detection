@@ -32,6 +32,7 @@ class FitConfig:
     limit_train_batches: float | int = 1.0
     limit_val_batches: float | int = 1.0
     val_composites: tuple[str, ...] = ()  # composites of validation AOIs for site-level metrics
+    seed: int = 0  # seeds model init, shuffling and augmentation (pl.seed_everything)
 
 
 def resolve_monitor(cfg: FitConfig) -> tuple[str, str]:
@@ -57,13 +58,14 @@ def fit(cfg: FitConfig) -> str:
 def fit_with_trainer(cfg: FitConfig):
     """Train; return (best checkpoint path, the pl.Trainer) so callers can inspect metrics."""
     import pytorch_lightning as pl
-    import torch
     from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
     from torch.utils.data import DataLoader
 
     from services.training.dataset import LaunchSiteDataset, collate
     from services.training.lightning_module import LaunchSiteSegModule
 
+    # Before anything random happens: model init, augmentation, loader shuffling.
+    pl.seed_everything(cfg.seed, workers=True)
     chips = json.loads(Path(cfg.manifest_path).read_text())
     train_ds = LaunchSiteDataset(chips, Path(cfg.stats_path), split="train", augment=True)
     val_ds = LaunchSiteDataset(chips, Path(cfg.stats_path), split="val", augment=False)
@@ -130,7 +132,6 @@ def fit_with_trainer(cfg: FitConfig):
         enable_progress_bar=False,
         deterministic=True,
     )
-    torch.manual_seed(0)
     trainer.fit(module, train_loader, val_loader)
     best = trainer.checkpoint_callback.best_model_path
     logger.info("best checkpoint: %s", best)

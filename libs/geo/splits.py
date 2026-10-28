@@ -40,11 +40,16 @@ def assign_splits(
     splits: dict[str, list[str]],
     exclusion_km: float = 20.0,
 ) -> list[dict]:
-    """Return new chip dicts with a 'split' key; inputs are not mutated."""
+    """Return new chip dicts with a 'split' key; inputs are not mutated.
+
+    Distances use each chip's `bbox_4326` (lon/lat, written by `chip_raster`), not `bbox`,
+    which is in the raster CRS.
+    """
     site_split = _site_split_map(sites, splits)
     out = []
     for chip in chips:
-        # `bbox` is in the raster CRS (UTM for Sentinel-2); site distances need lon/lat.
+        if "bbox_4326" not in chip:
+            raise ValueError("chip manifest predates bbox_4326; re-run tile_composite")
         lon, lat = _centroid(chip["bbox_4326"])
         nearest, d_km = _nearest_site(lon, lat, sites)
         split = site_split[nearest["name"]] if d_km <= exclusion_km else "train"

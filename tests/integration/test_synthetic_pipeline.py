@@ -7,6 +7,7 @@ measured by CI as the proof that the stages fit together.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 
@@ -24,6 +25,8 @@ from services.training.fit import FitConfig, fit
 from tests.fixtures.synthetic import make_synthetic_composite, site_lonlat
 
 pytestmark = pytest.mark.integration
+
+logger = logging.getLogger(__name__)
 
 SHIFT_EAST_M = 200_000.0
 
@@ -86,4 +89,7 @@ def test_planted_site_is_recovered_end_to_end(tmp_path: Path):
         prob_max = float(np.nanmax(src.read(1)))
     assert result.recall_at_5 == 1.0, f"planted site not in top 5 (prob max {prob_max}): {result}"
     assert result.fp_per_1000km2 < 100, result
-    assert time.perf_counter() - t0 < 120, "integration test must stay under two minutes"
+    elapsed = time.perf_counter() - t0
+    logger.info("synthetic pipeline: %.1f s, val prob max %.3f", elapsed, prob_max)
+    # Typically ~30 s on 16 cores; the bound only catches a pathological slowdown, not slow CI.
+    assert elapsed < 300, f"integration test took {elapsed:.0f} s"

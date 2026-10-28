@@ -58,8 +58,15 @@ class LaunchSiteDataset(Dataset):
             "image": torch.from_numpy(image.astype(np.float32)),
             "mask": torch.from_numpy(mask[None]),
             "weight": torch.from_numpy(weight[None]),
-            "meta": {"tile_id": chip["tile_id"], "bbox": chip["bbox"], "split": chip.get("split")},
+            "meta": _meta(chip),
         }
+
+
+def _meta(chip: dict) -> dict:
+    meta = {"tile_id": chip["tile_id"], "bbox": chip["bbox"], "split": chip.get("split")}
+    if "bbox_4326" in chip:
+        meta["bbox_4326"] = chip["bbox_4326"]
+    return meta
 
 
 def _augment(image: np.ndarray, mask: np.ndarray, weight: np.ndarray):

@@ -53,4 +53,10 @@ jobs:
           enable-cache: true
       - run: uv sync --locked --all-extras
       - run: PGPASSWORD=changeme psql -v ON_ERROR_STOP=1 -h localhost -U launchsite -d launchsite -f infra/postgres-init/001_schema.sql
-      - run: uv run pytest -q -m api
+      # api coverage is reported here (services/api is omitted from the lint-and-unit gate)
+      - run: uv run pytest -q -m api --cov --cov-config=.coveragerc.api --cov-report=term --cov-report=xml:coverage-api.xml --cov-fail-under=0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-api
+          path: coverage-api.xml
