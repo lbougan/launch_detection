@@ -1,16 +1,21 @@
-"""Spectral indices and composite generation for Sentinel-2 imagery."""
+"""Spectral indices, temporal compositing and the single normalisation step."""
 
 from __future__ import annotations
 
 import logging
+import warnings
+from contextlib import ExitStack
 from pathlib import Path
 
 import numpy as np
 import rasterio
+from rasterio.windows import Window
+
+from libs.geo.bandspec import BandSpec, read_bandspec
 
 logger = logging.getLogger(__name__)
 
-S2_BAND_ORDER = {"blue": 0, "green": 1, "red": 2, "nir": 3, "swir16": 4, "swir22": 5}
+INDEX_NAMES = ("ndvi", "ndwi", "ndbi", "bsi")
 
 
 def _safe_ratio(a: np.ndarray, b: np.ndarray, eps: float = 1e-8) -> np.ndarray:
@@ -26,81 +31,110 @@ def compute_ndwi(green: np.ndarray, nir: np.ndarray) -> np.ndarray:
 
 
 def compute_ndbi(swir: np.ndarray, nir: np.ndarray) -> np.ndarray:
-    """Normalized Difference Built-up Index — highlights built surfaces."""
+    """Normalised Difference Built-up Index: built surfaces are bright in SWIR."""
     return _safe_ratio(swir, nir)
 
 
 def compute_bsi(blue: np.ndarray, red: np.ndarray, nir: np.ndarray, swir: np.ndarray) -> np.ndarray:
-    """Bare Soil Index — useful for cleared / graded areas."""
+    """Bare Soil Index: graded or cleared ground."""
     num = (swir + red) - (nir + blue)
     den = (swir + red) + (nir + blue) + 1e-8
     return num / den
 
 
-def add_indices(stack: np.ndarray) -> np.ndarray:
-    """Append NDVI, NDWI, NDBI, BSI bands to a 6-band Sentinel-2 stack.
+def add_indices(stack: np.ndarray, names: tuple[str, ...]) -> tuple[np.ndarray, tuple[str, ...]]:
+    """Append NDVI, NDWI, NDBI, BSI computed from *reflectance* bands.
 
-    Input shape:  (6, H, W) — blue, green, red, nir, swir16, swir22
-    Output shape: (10, H, W)
+    `names` must contain blue, green, red, nir, swir16. Returns (stack+4, names+4).
     """
-    blue, green, red, nir, swir16, swir22 = [stack[i].astype(np.float32) for i in range(6)]
-    ndvi = compute_ndvi(nir, red)
-    ndwi = compute_ndwi(green, nir)
-    ndbi = compute_ndbi(swir16, nir)
-    bsi = compute_bsi(blue, red, nir, swir16)
-    return np.concatenate(
-        [stack.astype(np.float32), ndvi[None], ndwi[None], ndbi[None], bsi[None]], axis=0
+    idx = {n: i for i, n in enumerate(names)}
+    missing = [n for n in ("blue", "green", "red", "nir", "swir16") if n not in idx]
+    if missing:
+        raise ValueError(f"add_indices needs bands {missing}")
+    b = stack.astype(np.float32)
+    blue, green, red, nir, swir16 = (b[idx[n]] for n in ("blue", "green", "red", "nir", "swir16"))
+    extra = np.stack(
+        [
+            compute_ndvi(nir, red),
+            compute_ndwi(green, nir),
+            compute_ndbi(swir16, nir),
+            compute_bsi(blue, red, nir, swir16),
+        ]
     )
+    return np.concatenate([b, extra], axis=0), names + INDEX_NAMES
+
+
+COMPOSITE_BLOCK_ROWS = 512  # rows per block: peak RAM is one block x scenes x bands
+
+
+def _grid_of(src) -> tuple:
+    return (src.crs, src.transform, src.width, src.height, src.count)
 
 
 def build_temporal_composite(
-    scene_paths: list[Path],
-    method: str = "median",
-) -> tuple[np.ndarray, dict]:
-    """Build a temporal composite from multiple scenes.
+    scene_paths: list[Path], method: str = "median", block_rows: int = COMPOSITE_BLOCK_ROWS
+) -> tuple[np.ndarray, dict, BandSpec]:
+    """NaN-aware pixel-wise median (or mean) of reflectance scenes on one identical grid.
 
-    Args:
-        scene_paths: Paths to multi-band GeoTIFFs (same extent/resolution).
-        method: "median" or "mean".
-
-    Returns:
-        (composite_array, rasterio_profile)
+    Cloud-masked pixels are NaN in the inputs (see libs.geo.masks) and are therefore ignored;
+    a pixel that is cloudy in every scene stays NaN. Every scene must share CRS, transform and
+    shape (ingest warps them onto one AOI grid); the reduction runs in blocks of `block_rows`
+    rows. Returns (composite, profile, bandspec).
     """
-    arrays = []
-    profile = None
-    for p in scene_paths:
-        with rasterio.open(p) as src:
-            arrays.append(src.read())
-            if profile is None:
-                profile = src.profile.copy()
-
-    if not arrays:
+    if not scene_paths:
         raise ValueError("No scenes provided for compositing")
-
-    cube = np.stack(arrays, axis=0)  # (T, C, H, W)
-    if method == "median":
-        composite = np.nanmedian(cube, axis=0)
-    elif method == "mean":
-        composite = np.nanmean(cube, axis=0)
-    else:
+    if method not in ("median", "mean"):
         raise ValueError(f"Unknown method: {method}")
+    with rasterio.open(scene_paths[0]) as src:
+        profile = src.profile.copy()
+        spec = read_bandspec(src)
+        ref = _grid_of(src)
+    for p in scene_paths[1:]:
+        with rasterio.open(p) as src:
+            if _grid_of(src) != ref:
+                raise ValueError(
+                    f"{p} is not on the grid of {scene_paths[0]}: "
+                    f"{_grid_of(src)} != {ref} (crs, transform, width, height, bands)"
+                )
+    _, _, width, height, count = ref
+    reducer = np.nanmedian if method == "median" else np.nanmean
+    composite = np.empty((count, height, width), dtype=np.float32)
+    with ExitStack() as stack:
+        sources = [stack.enter_context(rasterio.open(p)) for p in scene_paths]
+        for r0 in range(0, height, block_rows):
+            window = Window(0, r0, width, min(block_rows, height - r0))
+            block = np.stack([s.read(window=window).astype(np.float32) for s in sources])
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message="All-NaN slice", category=RuntimeWarning)
+                warnings.filterwarnings(
+                    "ignore", message="Mean of empty slice", category=RuntimeWarning
+                )
+                composite[:, r0 : r0 + window.height] = reducer(block, axis=0)
+    profile.update(dtype="float32", nodata=float("nan"), count=count)
+    return composite, profile, spec
 
-    return composite.astype(np.float32), profile
+
+def check_stats_channels(names: tuple[str, ...], stats: dict) -> None:
+    """Raise unless `names` (bands + indices, in order) equal the channels the stats describe."""
+    if tuple(names) != tuple(stats["channels"]):
+        raise ValueError(
+            f"input channels {list(names)} do not match the stats channels {stats['channels']}"
+        )
 
 
-def normalize_percentile(
-    array: np.ndarray,
-    low: float = 2.0,
-    high: float = 98.0,
-) -> np.ndarray:
-    """Per-band percentile normalization to [0, 1]."""
-    result = np.empty_like(array, dtype=np.float32)
-    for i in range(array.shape[0]):
-        band = array[i]
-        lo = np.nanpercentile(band, low)
-        hi = np.nanpercentile(band, high)
-        if hi - lo < 1e-8:
-            result[i] = 0.0
-        else:
-            result[i] = np.clip((band - lo) / (hi - lo), 0.0, 1.0)
-    return result
+def normalize(array: np.ndarray, stats: dict) -> np.ndarray:
+    """The one normalisation used at train and serve time (decision 4).
+
+    Per channel c: clip((x - p2[c]) / (p98[c] - p2[c]), 0, 1), then (x - mean[c]) / std[c].
+    NaN stays NaN. `array` is (C,H,W) and C must equal len(stats["channels"]).
+    """
+    n = len(stats["channels"])
+    if array.shape[0] != n:
+        raise ValueError(f"array has {array.shape[0]} channels, stats has {n} channels")
+    p2 = np.asarray(stats["p2"], dtype=np.float32)[:, None, None]
+    p98 = np.asarray(stats["p98"], dtype=np.float32)[:, None, None]
+    mean = np.asarray(stats["mean"], dtype=np.float32)[:, None, None]
+    std = np.asarray(stats["std"], dtype=np.float32)[:, None, None]
+    x = array.astype(np.float32)
+    x = np.clip((x - p2) / np.maximum(p98 - p2, 1e-6), 0.0, 1.0)
+    return (x - mean) / np.maximum(std, 1e-6)

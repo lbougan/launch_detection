@@ -30,6 +30,84 @@
       "description": "SpaceX Starbase / Boca Chica",
       "bbox": [-97.5, 25.7, -96.8, 26.3],
       "priority": 2
+    },
+    {
+      "name": "plesetsk",
+      "description": "Plesetsk Cosmodrome",
+      "bbox": [40.4277, 62.7771, 40.7277, 63.0771],
+      "priority": 3
+    },
+    {
+      "name": "jiuquan",
+      "description": "Jiuquan Satellite Launch Center",
+      "bbox": [100.1414, 40.8106, 100.4414, 41.1106],
+      "priority": 3
+    },
+    {
+      "name": "xichang",
+      "description": "Xichang Satellite Launch Center",
+      "bbox": [101.8768, 28.0963, 102.1768, 28.3963],
+      "priority": 3
+    },
+    {
+      "name": "satish_dhawan",
+      "description": "Satish Dhawan Space Centre",
+      "bbox": [80.0804, 13.5699, 80.3804, 13.8699],
+      "priority": 3
+    },
+    {
+      "name": "tanegashima",
+      "description": "Tanegashima Space Center",
+      "bbox": [130.8589, 30.2509, 131.1589, 30.5509],
+      "priority": 3
+    },
+    {
+      "name": "guiana",
+      "description": "Guiana Space Centre",
+      "bbox": [-52.9193, 5.0822, -52.6193, 5.3822],
+      "priority": 3
+    },
+    {
+      "name": "vostochny",
+      "description": "Vostochny Cosmodrome",
+      "bbox": [128.184, 51.7344, 128.484, 52.0344],
+      "priority": 3
+    },
+    {
+      "name": "wenchang",
+      "description": "Wenchang Space Launch Site",
+      "bbox": [110.801, 19.4645, 111.101, 19.7645],
+      "priority": 3
+    },
+    {
+      "name": "semnan",
+      "description": "Semnan Space Center",
+      "bbox": [53.7711, 35.0845, 54.0711, 35.3845],
+      "priority": 3
+    },
+    {
+      "name": "sohae",
+      "description": "Sohae Satellite Launching Station",
+      "bbox": [124.5553, 39.5102, 124.8553, 39.8102],
+      "priority": 3
+    },
+    {
+      "name": "palmachim",
+      "description": "Palmachim Airbase",
+      "bbox": [34.5409, 31.7475, 34.8409, 32.0475],
+      "priority": 3
+    },
+    {
+      "name": "rocket_lab_lc1",
+      "description": "Rocket Lab Launch Complex 1",
+      "bbox": [177.7149, -39.4115, 178.0149, -39.1115],
+      "priority": 3
+    },
+    {
+      "name": "esrange",
+      "description": "Esrange Space Center",
+      "bbox": [20.9564, 67.7433, 21.2564, 68.0433],
+      "priority": 3
     }
   ]
 }

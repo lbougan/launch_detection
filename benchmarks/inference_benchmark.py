@@ -9,7 +9,13 @@ Usage:
         --batch-sizes 1,8,16,32 \
         --overlaps 0,32,64
 
-Results are written to benchmarks/results/ as JSON.
+Modes: baseline (local torch), triton, triton_memopt (triton + memmap accumulator), plus
+fake / fake_memmap (constant predictor, no model or server) for smoke tests.
+
+Results are written to benchmarks/results/ as JSON (not written, exit code 1, if nothing ran).
+
+Caveats: ``peak_rss_mb`` is process-wide (ru_maxrss), so later modes include the peaks of earlier
+ones. ``peak_tracemalloc_mb`` does not count memmap pages (they live in the OS page cache).
 """
 
 from __future__ import annotations
@@ -26,7 +32,9 @@ from pathlib import Path
 
 import numpy as np
 import rasterio
-from rasterio.transform import from_bounds
+
+from libs.features.stats import compute_channel_stats, load_stats
+from libs.inference.sliding_window import iter_windows, run_sliding_window
 
 logger = logging.getLogger(__name__)
 
@@ -65,51 +73,16 @@ class BenchmarkResult:
         return d
 
 
-def _gpu_utilization() -> float | None:
-    """Sample current GPU utilization percentage, or None if unavailable."""
-    try:
-        import pynvml
+def create_synthetic_raster(size: int, tmpdir: str) -> Path:
+    """Synthetic 6-band composite (planted site, BANDSPEC tag) from `libs.synthetic`."""
+    from libs.synthetic import make_reflectance_cube, write_composite
 
-        pynvml.nvmlInit()
-        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-        util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-        return float(util.gpu)
-    except Exception:
-        return None
-
-
-def create_synthetic_raster(
-    height: int,
-    width: int,
-    n_bands: int = 6,
-    tmpdir: str | None = None,
-) -> Path:
-    """Create a synthetic multi-band GeoTIFF for benchmarking."""
-    rng = np.random.default_rng(42)
-    data = rng.integers(0, 10000, size=(n_bands, height, width), dtype=np.uint16).astype(np.float32)
-
-    path = Path(tmpdir or tempfile.mkdtemp()) / f"synthetic_{height}x{width}.tif"
-    transform = from_bounds(0, 0, width * 10, height * 10, width, height)
-    profile = {
-        "driver": "GTiff",
-        "dtype": "float32",
-        "width": width,
-        "height": height,
-        "count": n_bands,
-        "crs": "EPSG:32633",
-        "transform": transform,
-    }
-    with rasterio.open(path, "w", **profile) as dst:
-        dst.write(data)
-
-    return path
+    cube = make_reflectance_cube(size, size, size // 2, size // 2, max(8, size // 25))
+    return write_composite(Path(tmpdir) / f"synthetic_{size}x{size}.tif", cube)
 
 
 def _count_tiles(h: int, w: int, tile_size: int, overlap: int) -> int:
-    step = tile_size - overlap
-    rows = max(0, (h - tile_size) // step + 1)
-    cols = max(0, (w - tile_size) // step + 1)
-    return rows * cols
+    return sum(1 for _ in iter_windows(h, w, tile_size, overlap))
 
 
 def _measure_rss_mb() -> float:
@@ -117,44 +90,56 @@ def _measure_rss_mb() -> float:
     return ru.ru_maxrss / 1024  # Linux reports KB
 
 
-def benchmark_baseline(
+class _TimedPredictor:
+    """Wraps a predictor and records per-batch latency in milliseconds."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.latencies_ms: list[float] = []
+
+    def predict(self, batch: np.ndarray) -> np.ndarray:
+        t0 = time.perf_counter()
+        out = self.inner.predict(batch)
+        self.latencies_ms.append((time.perf_counter() - t0) * 1000)
+        return out
+
+
+def benchmark_mode(
+    name: str,
+    predictor,
+    memmap: bool,
     raster_path: Path,
-    checkpoint_path: str,
+    stats: dict,
     output_dir: Path,
     tile_size: int,
     overlap: int,
     batch_size: int,
-    device: str,
 ) -> BenchmarkResult:
-    """Benchmark the original sliding-window inference."""
-    from services.training.inference import load_model, sliding_window_inference
-
+    """Benchmark one (predictor, memmap) pair over the shared sliding-window implementation."""
     raster_path, output_dir = Path(raster_path), Path(output_dir)
     h, w = _raster_dims(raster_path)
     n_tiles = _count_tiles(h, w, tile_size, overlap)
-    out = output_dir / "baseline_prob.tif"
-
-    model = load_model(checkpoint_path, device)
+    timed = _TimedPredictor(predictor)
 
     tracemalloc.start()
     t0 = time.perf_counter()
-
-    sliding_window_inference(
-        model=model,
+    run_sliding_window(
         raster_path=raster_path,
-        output_path=out,
-        tile_size=tile_size,
+        output_path=output_dir / f"{name}_prob.tif",
+        predictor=timed,
+        stats=stats,
+        tile=tile_size,
         overlap=overlap,
         batch_size=batch_size,
-        device=device,
+        memmap=memmap,
+        tmpdir=output_dir,
     )
-
     wall = time.perf_counter() - t0
     _, peak_tm = tracemalloc.get_traced_memory()
     tracemalloc.stop()
 
     return BenchmarkResult(
-        mode=f"baseline_{device}",
+        mode=name,
         raster_size=(h, w),
         tile_size=tile_size,
         overlap=overlap,
@@ -164,127 +149,25 @@ def benchmark_baseline(
         tiles_per_sec=n_tiles / wall if wall > 0 else 0,
         peak_rss_mb=_measure_rss_mb(),
         peak_tracemalloc_mb=peak_tm / (1024 * 1024),
+        batch_latencies_ms=timed.latencies_ms,
     )
 
 
-def benchmark_triton(
-    raster_path: Path,
-    triton_url: str,
-    output_dir: Path,
-    tile_size: int,
-    overlap: int,
-    batch_size: int,
-) -> BenchmarkResult:
-    """Benchmark Triton-backed sliding-window inference."""
-    from services.serving.triton_client import (
-        TritonSegClient,
-        _generate_tile_batches,
-        _tile_windows,
-    )
+def _build_mode(mode: str, args) -> tuple[object, bool] | None:
+    """Return (predictor, memmap) for a mode name, or None if unknown."""
+    if mode in ("fake", "fake_memmap"):
+        from libs.inference.predictors import FakePredictor
 
-    raster_path, output_dir = Path(raster_path), Path(output_dir)
-    h, w = _raster_dims(raster_path)
-    n_tiles = _count_tiles(h, w, tile_size, overlap)
-    out = output_dir / "triton_prob.tif"
+        return FakePredictor(), mode == "fake_memmap"
+    if mode == "baseline":
+        from libs.inference.predictors import LocalTorchPredictor
 
-    client = TritonSegClient(url=triton_url)
-    batch_latencies: list[float] = []
+        return LocalTorchPredictor.from_checkpoint(args.checkpoint, device=args.device), False
+    if mode in ("triton", "triton_memopt"):
+        from libs.inference.predictors import TritonPredictor
 
-    tracemalloc.start()
-    t0 = time.perf_counter()
-
-    with rasterio.open(raster_path) as src:
-        profile = src.profile.copy()
-        prob_map = np.zeros((h, w), dtype=np.float32)
-        count_map = np.zeros((h, w), dtype=np.float32)
-
-        windows = _tile_windows(h, w, tile_size, overlap)
-
-        for coords, batch_array in _generate_tile_batches(
-            src, windows, tile_size, batch_size, use_indices=True
-        ):
-            bt0 = time.perf_counter()
-            probs = client.infer_batch(batch_array)
-            batch_latencies.append((time.perf_counter() - bt0) * 1000)
-
-            for (row, col), tile_prob in zip(coords, probs):
-                prob_map[row : row + tile_size, col : col + tile_size] += tile_prob
-                count_map[row : row + tile_size, col : col + tile_size] += 1.0
-
-    valid = count_map > 0
-    prob_map[valid] /= count_map[valid]
-
-    out_profile = profile.copy()
-    out_profile.update(count=1, dtype="float32", compress="deflate")
-    with rasterio.open(out, "w", **out_profile) as dst:
-        dst.write(prob_map, 1)
-
-    wall = time.perf_counter() - t0
-    _, peak_tm = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
-    client.close()
-
-    return BenchmarkResult(
-        mode="triton",
-        raster_size=(h, w),
-        tile_size=tile_size,
-        overlap=overlap,
-        batch_size=batch_size,
-        n_tiles=n_tiles,
-        wall_time_s=wall,
-        tiles_per_sec=n_tiles / wall if wall > 0 else 0,
-        peak_rss_mb=_measure_rss_mb(),
-        peak_tracemalloc_mb=peak_tm / (1024 * 1024),
-        batch_latencies_ms=batch_latencies,
-    )
-
-
-def benchmark_triton_memopt(
-    raster_path: Path,
-    triton_url: str,
-    output_dir: Path,
-    tile_size: int,
-    overlap: int,
-    batch_size: int,
-    max_memory_mb: float = 512.0,
-) -> BenchmarkResult:
-    """Benchmark memory-optimized Triton inference."""
-    from services.serving.memory_optimized import memory_optimized_inference
-
-    raster_path, output_dir = Path(raster_path), Path(output_dir)
-    h, w = _raster_dims(raster_path)
-    n_tiles = _count_tiles(h, w, tile_size, overlap)
-    out = output_dir / "triton_memopt_prob.tif"
-
-    tracemalloc.start()
-    t0 = time.perf_counter()
-
-    memory_optimized_inference(
-        raster_path=raster_path,
-        output_path=out,
-        triton_url=triton_url,
-        tile_size=tile_size,
-        overlap=overlap,
-        batch_size=batch_size,
-        max_memory_mb=max_memory_mb,
-    )
-
-    wall = time.perf_counter() - t0
-    _, peak_tm = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
-
-    return BenchmarkResult(
-        mode="triton_memopt",
-        raster_size=(h, w),
-        tile_size=tile_size,
-        overlap=overlap,
-        batch_size=batch_size,
-        n_tiles=n_tiles,
-        wall_time_s=wall,
-        tiles_per_sec=n_tiles / wall if wall > 0 else 0,
-        peak_rss_mb=_measure_rss_mb(),
-        peak_tracemalloc_mb=peak_tm / (1024 * 1024),
-    )
+        return TritonPredictor.connect(args.triton_url), mode == "triton_memopt"
+    return None
 
 
 def _raster_dims(path: Path) -> tuple[int, int]:
@@ -314,6 +197,7 @@ def _print_table(results: list[BenchmarkResult]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Inference benchmark harness")
     parser.add_argument("--raster", help="Path to raster (omit to use synthetic)")
+    parser.add_argument("--stats", help="stats.json (required with --raster)")
     parser.add_argument("--checkpoint", default="checkpoints/best.ckpt")
     parser.add_argument("--triton-url", default="localhost:8001")
     parser.add_argument(
@@ -331,9 +215,10 @@ def main() -> None:
     )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--output-dir", default="benchmarks/results")
-    parser.add_argument("--max-memory-mb", type=float, default=512.0)
 
     args = parser.parse_args()
+    if args.raster and not args.stats:
+        parser.error("--stats is required with --raster")
     logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
 
     modes = [m.strip() for m in args.modes.split(",")]
@@ -353,61 +238,59 @@ def main() -> None:
             raster_paths = {}
             for size in raster_sizes:
                 logger.info("Creating synthetic raster %dx%d ...", size, size)
-                raster_paths[size] = create_synthetic_raster(size, size, tmpdir=tmpdir)
+                raster_paths[size] = create_synthetic_raster(size, tmpdir)
 
         work_dir = Path(tmpdir) / "outputs"
         work_dir.mkdir()
 
+        built: dict[str, tuple[object, bool]] = {}
+        for mode in modes:
+            try:
+                pair = _build_mode(mode, args)
+            except Exception:
+                logger.exception("Could not set up mode %s", mode)
+                continue
+            if pair is None:
+                logger.warning("Unknown mode: %s", mode)
+                continue
+            built[mode] = pair
+
         for size_key, raster_path in raster_paths.items():
+            stats = (
+                load_stats(Path(args.stats))
+                if args.stats
+                else compute_channel_stats([raster_path], sample_px=20000)
+            )
             for ov in overlaps:
                 for bs in batch_sizes:
-                    for mode in modes:
+                    for mode, (predictor, memmap) in built.items():
                         label = f"{mode}|size={size_key}|ov={ov}|bs={bs}"
                         logger.info("Running: %s", label)
-
                         try:
-                            if mode == "baseline":
-                                result = benchmark_baseline(
-                                    raster_path,
-                                    args.checkpoint,
-                                    work_dir,
-                                    args.tile_size,
-                                    ov,
-                                    bs,
-                                    args.device,
-                                )
-                            elif mode == "triton":
-                                result = benchmark_triton(
-                                    raster_path,
-                                    args.triton_url,
-                                    work_dir,
-                                    args.tile_size,
-                                    ov,
-                                    bs,
-                                )
-                            elif mode == "triton_memopt":
-                                result = benchmark_triton_memopt(
-                                    raster_path,
-                                    args.triton_url,
-                                    work_dir,
-                                    args.tile_size,
-                                    ov,
-                                    bs,
-                                    max_memory_mb=args.max_memory_mb,
-                                )
-                            else:
-                                logger.warning("Unknown mode: %s", mode)
-                                continue
-
+                            result = benchmark_mode(
+                                mode,
+                                predictor,
+                                memmap,
+                                raster_path,
+                                stats,
+                                work_dir,
+                                args.tile_size,
+                                ov,
+                                bs,
+                            )
                             all_results.append(result)
                             logger.info(
-                                "  → %.2fs, %.1f tiles/s, %.0f MB RSS",
+                                "  -> %.2fs, %.1f tiles/s, %.0f MB RSS",
                                 result.wall_time_s,
                                 result.tiles_per_sec,
                                 result.peak_rss_mb,
                             )
                         except Exception:
-                            logger.exception("  → FAILED: %s", label)
+                            logger.exception("  -> FAILED: %s", label)
+
+    if not built or not all_results:
+        logger.error("No benchmark results produced; not writing a results file")
+        raise SystemExit(1)
 
     _print_table(all_results)
 

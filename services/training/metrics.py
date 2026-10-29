@@ -1,121 +1,69 @@
-"""Custom evaluation metrics for launch-site detection.
-
-Implements the spec's key metrics:
-  - Site-level recall@K
-  - False positive rate per 1000 km^2
-  - Calibration (confidence vs precision)
-"""
+"""Site-level evaluation (model card): recall@K, FP per 1000 km², reliability on `prob`."""
 
 from __future__ import annotations
 
 import numpy as np
-from shapely.geometry import Point
+
+from libs.geo.projection import distance_m
 
 
-def site_level_recall_at_k(
-    predicted_polygons: list[dict],
-    known_sites: list[dict],
-    k: int = 10,
-    match_distance_km: float = 5.0,
+def _matches(pred: dict, sites: list[dict], match_m: float) -> bool:
+    return any(
+        distance_m(pred["centroid_lon"], pred["centroid_lat"], s["lon"], s["lat"]) <= match_m
+        for s in sites
+    )
+
+
+def _ranked(preds: list[dict]) -> list[dict]:
+    return sorted(
+        preds,
+        key=lambda p: p.get("rank_score") if p.get("rank_score") is not None else p["prob"],
+        reverse=True,
+    )
+
+
+def site_recall_at_k(
+    preds: list[dict], sites: list[dict], k: int = 10, match_m: float = 5000.0
 ) -> float:
-    """What fraction of known sites appear in the top-K ranked predictions?
-
-    Args:
-        predicted_polygons: Sorted by score (descending). Each has 'centroid_lon', 'centroid_lat'.
-        known_sites: Each has 'lon', 'lat'.
-        k: Number of top predictions to consider.
-        match_distance_km: Max distance for a prediction to "match" a site.
-
-    Returns:
-        Recall value in [0, 1].
-    """
-    if not known_sites:
+    if not sites:
         return 0.0
-
-    match_deg = match_distance_km / 111.0
-    top_k = predicted_polygons[:k]
-    matched = 0
-
-    for site in known_sites:
-        site_pt = Point(site["lon"], site["lat"])
-        for pred in top_k:
-            pred_pt = Point(pred["centroid_lon"], pred["centroid_lat"])
-            if site_pt.distance(pred_pt) < match_deg:
-                matched += 1
-                break
-
-    return matched / len(known_sites)
+    top = _ranked(preds)[:k]
+    hit = sum(
+        1
+        for s in sites
+        if any(
+            distance_m(p["centroid_lon"], p["centroid_lat"], s["lon"], s["lat"]) <= match_m
+            for p in top
+        )
+    )
+    return hit / len(sites)
 
 
-def false_positive_rate_per_1000km2(
-    predicted_polygons: list[dict],
-    known_sites: list[dict],
-    total_area_km2: float,
-    match_distance_km: float = 5.0,
+def fp_per_1000km2(
+    preds: list[dict], sites: list[dict], scanned_km2: float, match_m: float = 5000.0
 ) -> float:
-    """Count false positives (predictions not near any known site) per 1000 km^2.
-
-    Args:
-        predicted_polygons: Each has 'centroid_lon', 'centroid_lat'.
-        known_sites: Each has 'lon', 'lat'.
-        total_area_km2: Total area scanned.
-        match_distance_km: Max distance to match.
-
-    Returns:
-        FP rate per 1000 km^2.
-    """
-    if total_area_km2 <= 0:
+    if scanned_km2 <= 0:
         return 0.0
-
-    match_deg = match_distance_km / 111.0
-    fp_count = 0
-
-    for pred in predicted_polygons:
-        pred_pt = Point(pred["centroid_lon"], pred["centroid_lat"])
-        is_tp = any(pred_pt.distance(Point(s["lon"], s["lat"])) < match_deg for s in known_sites)
-        if not is_tp:
-            fp_count += 1
-
-    return fp_count / (total_area_km2 / 1000.0)
+    fp = sum(1 for p in preds if not _matches(p, sites, match_m))
+    return fp / (scanned_km2 / 1000.0)
 
 
-def calibration_bins(
-    predictions: list[dict],
-    known_sites: list[dict],
-    n_bins: int = 10,
-    match_distance_km: float = 5.0,
+def reliability_bins(
+    preds: list[dict], sites: list[dict], n_bins: int = 10, match_m: float = 5000.0
 ) -> dict:
-    """Compute calibration: for each confidence bin, what fraction are true positives?
-
-    Returns dict with 'bin_edges', 'bin_accuracy', 'bin_confidence', 'bin_count'.
-    """
-    match_deg = match_distance_km / 111.0
-    scores = np.array([p["score"] for p in predictions])
-
-    is_tp = np.zeros(len(predictions), dtype=bool)
-    for i, pred in enumerate(predictions):
-        pred_pt = Point(pred["centroid_lon"], pred["centroid_lat"])
-        is_tp[i] = any(pred_pt.distance(Point(s["lon"], s["lat"])) < match_deg for s in known_sites)
-
-    bin_edges = np.linspace(0, 1, n_bins + 1)
-    bin_accuracy = []
-    bin_confidence = []
-    bin_count = []
-
-    for lo, hi in zip(bin_edges[:-1], bin_edges[1:]):
-        mask = (scores >= lo) & (scores < hi)
-        count = mask.sum()
-        bin_count.append(int(count))
-        if count > 0:
-            bin_accuracy.append(float(is_tp[mask].mean()))
-            bin_confidence.append(float(scores[mask].mean()))
-        else:
-            bin_accuracy.append(0.0)
-            bin_confidence.append((lo + hi) / 2)
-
+    """Calibration of `prob` (never rank_score): per confidence bin, fraction that match a site."""
+    probs = np.array([p["prob"] for p in preds], dtype=float)
+    is_tp = np.array([_matches(p, sites, match_m) for p in preds], dtype=bool)
+    edges = np.linspace(0.0, 1.0, n_bins + 1)
+    acc, conf, count = [], [], []
+    for lo, hi in zip(edges[:-1], edges[1:], strict=True):
+        sel = (probs >= lo) & ((probs < hi) if hi < 1.0 else (probs <= hi))
+        count.append(int(sel.sum()))
+        acc.append(float(is_tp[sel].mean()) if sel.any() else 0.0)
+        conf.append(float(probs[sel].mean()) if sel.any() else (lo + hi) / 2)
     return {
-        "bin_edges": bin_edges.tolist(),
-        "bin_accuracy": bin_accuracy,
-        "bin_confidence": bin_confidence,
-        "bin_count": bin_count,
+        "bin_edges": edges.tolist(),
+        "bin_accuracy": acc,
+        "bin_confidence": conf,
+        "bin_count": count,
     }

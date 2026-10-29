@@ -1,6 +1,6 @@
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.6
+    rev: v0.17.3
     hooks:
       - id: ruff-check
         args: [--fix]
@@ -20,3 +20,4 @@ repos:
       - id: debug-statements
       - id: check-added-large-files
         args: [--maxkb=1000]
+        exclude: ^uv\.lock$

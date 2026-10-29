@@ -52,6 +52,8 @@ let currentMinScore = 0.3;
 scoreSlider.addEventListener("input", (e) => {
   currentMinScore = e.target.value / 100;
   scoreValue.textContent = currentMinScore.toFixed(2);
+  const mvt = map.getSource("detections-mvt");
+  if (mvt) mvt.setTiles([vectorTileUrl(currentMinScore)]);
   loadDetections();
 });
 
@@ -94,12 +96,30 @@ map.on("load", async () => {
   });
 });
 
+// Detection footprints from the MVT endpoint, drawn once the map is zoomed in enough for a
+// site polygon to be larger than a marker. The centroid circles come from /detections (GeoJSON),
+// so the point fallback the tiles carry at low zoom is not drawn twice.
+const MVT_FILL_MIN_ZOOM = 9;
+
 function addVectorTileSource() {
   map.addSource("detections-mvt", {
     type: "vector",
-    tiles: [vectorTileUrl()],
+    tiles: [vectorTileUrl(currentMinScore)],
     minzoom: 0,
     maxzoom: 14,
+  });
+  map.addLayer({
+    id: "detections-mvt-fill",
+    type: "fill",
+    source: "detections-mvt",
+    "source-layer": "detections",
+    minzoom: MVT_FILL_MIN_ZOOM,
+    filter: ["==", ["geometry-type"], "Polygon"],
+    paint: {
+      "fill-color": "#ef4444",
+      "fill-opacity": 0.25,
+      "fill-outline-color": "#fca5a5",
+    },
   });
 }
 

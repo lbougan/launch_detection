@@ -1,0 +1,20 @@
+{
+  "description": "Site-held-out split (decision 2, 28 Oct 2026). Chips within 20 km of a site follow it.",
+  "exclusion_km": 20.0,
+  "test": ["Satish Dhawan Space Centre", "Tanegashima Space Center", "Guiana Space Centre"],
+  "val": ["Xichang Satellite Launch Center", "Plesetsk Cosmodrome", "Sohae Satellite Launching Station"],
+  "train": [
+    "Kennedy Space Center LC-39A",
+    "Cape Canaveral SLC-40",
+    "Vandenberg SLC-4E",
+    "Baikonur Cosmodrome",
+    "Jiuquan Satellite Launch Center",
+    "Vostochny Cosmodrome",
+    "Wenchang Space Launch Site",
+    "Semnan Space Center",
+    "Palmachim Airbase",
+    "Rocket Lab Launch Complex 1",
+    "SpaceX Starbase Boca Chica",
+    "Esrange Space Center"
+  ]
+}

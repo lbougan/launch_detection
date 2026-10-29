@@ -11,8 +11,8 @@ CREATE TABLE IF NOT EXISTS imagery_catalog (
     metadata        JSONB DEFAULT '{}',
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
-CREATE INDEX idx_imagery_bbox ON imagery_catalog USING GIST (bbox);
-CREATE INDEX idx_imagery_date ON imagery_catalog (acquired_date);
+CREATE INDEX IF NOT EXISTS idx_imagery_bbox ON imagery_catalog USING GIST (bbox);
+CREATE INDEX IF NOT EXISTS idx_imagery_date ON imagery_catalog (acquired_date);
 
 CREATE TABLE IF NOT EXISTS tiles (
     id              SERIAL PRIMARY KEY,
@@ -24,28 +24,40 @@ CREATE TABLE IF NOT EXISTS tiles (
     split           TEXT DEFAULT 'train',
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
-CREATE INDEX idx_tiles_bbox ON tiles USING GIST (bbox);
+CREATE INDEX IF NOT EXISTS idx_tiles_bbox ON tiles USING GIST (bbox);
 
 CREATE TABLE IF NOT EXISTS detections (
     id              SERIAL PRIMARY KEY,
     geom            GEOMETRY(Polygon, 4326) NOT NULL,
-    score           REAL NOT NULL,
+    score           REAL NOT NULL,  -- rank score (model prob x geometry/context factors); drives the map
+    prob            REAL,           -- mean model probability over the polygon
     model_version   TEXT NOT NULL,
     evidence        JSONB DEFAULT '{}',
     area_km2        REAL,
     compactness     REAL,
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
-CREATE INDEX idx_detections_geom ON detections USING GIST (geom);
-CREATE INDEX idx_detections_score ON detections (score DESC);
+CREATE INDEX IF NOT EXISTS idx_detections_geom ON detections USING GIST (geom);
+CREATE INDEX IF NOT EXISTS idx_detections_score ON detections (score DESC);
 
 CREATE TABLE IF NOT EXISTS known_sites (
     id              SERIAL PRIMARY KEY,
-    name            TEXT NOT NULL,
+    name            TEXT NOT NULL UNIQUE,
     country         TEXT,
     geom            GEOMETRY(Point, 4326) NOT NULL,
     buffer_geom     GEOMETRY(Polygon, 4326),
     source          TEXT,
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
-CREATE INDEX idx_known_sites_geom ON known_sites USING GIST (geom);
+CREATE INDEX IF NOT EXISTS idx_known_sites_geom ON known_sites USING GIST (geom);
+
+-- Upgrades for databases created before v0.2 (this init script only runs on first boot,
+-- so everything below must be idempotent).
+ALTER TABLE detections ADD COLUMN IF NOT EXISTS prob REAL;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'known_sites_name_key') THEN
+        ALTER TABLE known_sites ADD CONSTRAINT known_sites_name_key UNIQUE (name);
+    END IF;
+END $$;

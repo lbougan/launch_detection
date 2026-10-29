@@ -2,26 +2,31 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import os
+from datetime import date
 from pathlib import Path
 
 from prefect import flow
 
-from libs.config import settings
+from libs.config import default_stats_path, settings
+from libs.geo.chips import load_known_sites
+from libs.geo.splits import aoi_split, count_by_split
 from services.pipeline.tasks import (
+    assign_splits_task,
     build_composite_task,
     build_labels_task,
+    compute_stats_task,
     ingest_aoi_task,
     postprocess_task,
     run_inference_task,
-    run_triton_inference_task,
+    seed_known_sites_task,
     store_detections_task,
     tile_composite_task,
     train_model_task,
 )
-
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
@@ -33,9 +38,14 @@ def ingest_and_preprocess_flow(
     aoi_config_path: str = "data/manifests/aoi_config.json",
     date_range: str = "2024-01-01/2024-06-30",
     known_sites_path: str = "data/manifests/known_sites.json",
+    splits_path: str = "data/manifests/splits.json",
     max_cloud_cover: float = 20.0,
+    max_scenes: int = 50,
 ) -> str:
     """Flow 1: Ingest imagery, build composites, tile, and create labels.
+
+    Args:
+        max_scenes: Upper bound on Sentinel-2 scenes searched and downloaded per AOI.
 
     Returns the path to the chip manifest JSON.
     """
@@ -44,6 +54,10 @@ def ingest_and_preprocess_flow(
 
     data_dir = Path(settings.data_dir)
     all_chips = []
+    training_composites: list[str] = []
+    sites = load_known_sites(Path(known_sites_path))
+    with open(splits_path) as f:
+        splits = json.load(f)
 
     for aoi in aoi_config["aois"]:
         aoi_name = aoi["name"]
@@ -56,6 +70,7 @@ def ingest_and_preprocess_flow(
             date_range=date_range,
             output_dir=str(aoi_dir),
             max_cloud_cover=max_cloud_cover,
+            limit=max_scenes,
         )
 
         s2_paths = [p for p in scene_paths if "sentinel2" in p]
@@ -68,23 +83,42 @@ def ingest_and_preprocess_flow(
             output_path=str(data_dir / "composites" / f"{aoi_name}_composite.tif"),
         )
 
+        if aoi_split(aoi, sites, splits) == "train":
+            training_composites.append(composite_path)
+
         chips = tile_composite_task(
             composite_path=composite_path,
             output_dir=str(data_dir / "tiles" / aoi_name),
         )
 
-        for chip in chips:
-            chip["aoi"] = aoi_name
-        all_chips.extend(chips)
+        all_chips.extend({**chip, "aoi": aoi_name} for chip in chips)
 
-    labeled_chips = build_labels_task(
+    split_chips = assign_splits_task(
         chip_manifest=all_chips,
         known_sites_path=known_sites_path,
+        splits_path=splits_path,
+        aois=aoi_config["aois"],
     )
+    logger.info("Chips per split: %s", count_by_split(split_chips))
+
+    labeled_chips = build_labels_task(
+        chip_manifest=split_chips,
+        known_sites_path=known_sites_path,
+    )
+
+    stats_path = str(default_stats_path())
+    if training_composites:
+        compute_stats_task(
+            composite_paths=training_composites,
+            output_path=stats_path,
+        )
+    else:
+        logger.warning("No training composites; channel stats not computed")
 
     manifest_path = str(data_dir / "manifests" / "chip_manifest.json")
     with open(manifest_path, "w") as f:
         json.dump(labeled_chips, f, indent=2)
+    logger.info("stats_path=%s splits_path=%s", stats_path, splits_path)
 
     print(f"Created chip manifest with {len(labeled_chips)} tiles → {manifest_path}")
     return manifest_path
@@ -93,34 +127,57 @@ def ingest_and_preprocess_flow(
 @flow(name="train-model", log_prints=True)
 def train_flow(
     manifest_path: str = "data/manifests/chip_manifest.json",
-    known_sites_path: str = "data/manifests/known_sites.json",
+    stats_path: str = str(default_stats_path()),
     model_type: str = "unet",
     encoder: str = "resnet34",
-    in_channels: int = 10,
     lr: float = 1e-3,
     epochs: int = 50,
     batch_size: int = 16,
     gpus: int = 0,
     experiment_name: str = "launchsite-seg",
+    aoi_config_path: str = "data/manifests/aoi_config.json",
+    known_sites_path: str = "data/manifests/known_sites.json",
+    splits_path: str = "data/manifests/splits.json",
 ) -> str:
     """Flow 2: Train the segmentation model.
 
+    Validation AOIs' composites feed the site-level recall monitor.
     Returns the path to the best checkpoint.
     """
+    with open(aoi_config_path) as f:
+        aoi_config = json.load(f)
+    sites = load_known_sites(Path(known_sites_path))
+    with open(splits_path) as f:
+        splits = json.load(f)
+    composites_dir = Path(settings.data_dir) / "composites"
+    val_composites = [
+        str(composites_dir / f"{aoi['name']}_composite.tif")
+        for aoi in aoi_config["aois"]
+        if aoi_split(aoi, sites, splits) == "val"
+    ]
     best_ckpt = train_model_task(
         manifest_path=manifest_path,
-        known_sites_path=known_sites_path,
+        stats_path=stats_path,
         model_type=model_type,
         encoder=encoder,
-        in_channels=in_channels,
         lr=lr,
         epochs=epochs,
         batch_size=batch_size,
         gpus=gpus,
         experiment_name=experiment_name,
+        known_sites_path=known_sites_path,
+        splits_path=splits_path,
+        val_composites=tuple(val_composites),
     )
     print(f"Training complete. Best checkpoint: {best_ckpt}")
     return best_ckpt
+
+
+def detect_stats_path(serving_mode: str, stats_path: str) -> str:
+    """Triton needs the stats file; a local checkpoint carries its own (empty = use those)."""
+    if serving_mode == "triton" and not stats_path:
+        return str(default_stats_path())
+    return stats_path
 
 
 @flow(name="scan-and-detect", log_prints=True)
@@ -129,9 +186,11 @@ def scan_and_detect_flow(
     checkpoint_path: str = "checkpoints/best.ckpt",
     model_version: str = "v0.1",
     threshold: float = 0.5,
+    stats_path: str = "",
     device: str = "cpu",
     serving_mode: str = "",
     triton_url: str = "",
+    known_sites_path: str = "data/manifests/known_sites.json",
 ) -> int:
     """Run inference over AOI composites, postprocess, and store detections.
 
@@ -139,18 +198,31 @@ def scan_and_detect_flow(
         serving_mode: ``"local"`` for in-process PyTorch, ``"triton"`` for
             Triton Inference Server. Defaults to ``"triton"`` when the
             ``TRITON_URL`` env var is set, otherwise ``"local"``.
+        device: Torch device for ``serving_mode='local'``.
+        stats_path: Channel stats file. A local checkpoint carries its own stats, so the
+            default (empty) uses those and a file given is checked against them; Triton
+            serving needs the file and defaults to the project's ``channel_stats.json``.
         triton_url: Triton gRPC endpoint (overrides ``TRITON_URL`` env var).
+        known_sites_path: Manifest seeded into ``known_sites`` first, so the map
+            always has the reference layer.
 
     Returns:
         Total number of stored detections.
     """
+    if Path(known_sites_path).exists():
+        seed_known_sites_task(known_sites_path)
+    else:
+        logger.warning("Known-sites manifest %s not found; skipping seeding", known_sites_path)
+
     if not serving_mode:
         serving_mode = "triton" if os.environ.get("TRITON_URL") else "local"
+    stats_path = detect_stats_path(serving_mode, stats_path)
 
     with open(aoi_config_path) as f:
         aoi_config = json.load(f)
 
     data_dir = Path(settings.data_dir)
+    scan_date = date.today().isoformat()
     total_stored = 0
 
     for aoi in aoi_config["aois"]:
@@ -163,19 +235,15 @@ def scan_and_detect_flow(
 
         prob_path = str(data_dir / "predictions" / f"{aoi_name}_prob.tif")
 
-        if serving_mode == "triton":
-            run_triton_inference_task(
-                raster_path=str(composite_path),
-                output_path=prob_path,
-                triton_url=triton_url,
-            )
-        else:
-            run_inference_task(
-                checkpoint_path=checkpoint_path,
-                raster_path=str(composite_path),
-                output_path=prob_path,
-                device=device,
-            )
+        run_inference_task(
+            raster_path=str(composite_path),
+            output_path=prob_path,
+            stats_path=stats_path,
+            serving_mode=serving_mode,
+            checkpoint_path=checkpoint_path,
+            triton_url=triton_url,
+            device=device,
+        )
 
         geojson = postprocess_task(
             prob_raster_path=prob_path,
@@ -185,6 +253,8 @@ def scan_and_detect_flow(
         stored = store_detections_task(
             geojson=geojson,
             model_version=model_version,
+            composite_path=str(composite_path.resolve()),
+            scan_date=scan_date,
         )
         total_stored += stored
 
@@ -219,7 +289,7 @@ def full_pipeline_flow(
     if not skip_training:
         best_ckpt = train_flow(
             manifest_path=manifest_path,
-            known_sites_path=known_sites_path,
+            stats_path=str(default_stats_path()),
             epochs=epochs,
             batch_size=batch_size,
             gpus=gpus,
@@ -231,13 +301,13 @@ def full_pipeline_flow(
         aoi_config_path=aoi_config_path,
         checkpoint_path=checkpoint_path,
         model_version=model_version,
+        known_sites_path=known_sites_path,
     )
     print(f"Pipeline complete. {total} detections stored.")
 
 
-if __name__ == "__main__":
-    import argparse
-
+def build_parser() -> argparse.ArgumentParser:
+    """CLI for the pipeline flows."""
     parser = argparse.ArgumentParser(description="Launch-site detection Prefect pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -257,10 +327,13 @@ if __name__ == "__main__":
     p_ingest.add_argument("--aoi-config", default="data/manifests/aoi_config.json")
     p_ingest.add_argument("--date-range", default="2024-01-01/2024-06-30")
     p_ingest.add_argument("--known-sites", default="data/manifests/known_sites.json")
+    p_ingest.add_argument(
+        "--max-scenes", type=int, default=50, help="Max Sentinel-2 scenes per AOI"
+    )
 
     p_train = sub.add_parser("train", help="Run training only")
     p_train.add_argument("--manifest", default="data/manifests/chip_manifest.json")
-    p_train.add_argument("--known-sites", default="data/manifests/known_sites.json")
+    p_train.add_argument("--stats", default=str(default_stats_path()))
     p_train.add_argument("--epochs", type=int, default=50)
     p_train.add_argument("--batch-size", type=int, default=16)
     p_train.add_argument("--gpus", type=int, default=0)
@@ -269,6 +342,7 @@ if __name__ == "__main__":
     p_detect.add_argument("--aoi-config", default="data/manifests/aoi_config.json")
     p_detect.add_argument("--checkpoint", default="checkpoints/best.ckpt")
     p_detect.add_argument("--model-version", default="v0.1")
+    p_detect.add_argument("--known-sites", default="data/manifests/known_sites.json")
     p_detect.add_argument(
         "--serving-mode",
         default="",
@@ -276,9 +350,18 @@ if __name__ == "__main__":
         help="Inference backend: 'local' (in-process PyTorch) or 'triton' (Triton server). "
         "Default: auto-detect via TRITON_URL env var.",
     )
+    p_detect.add_argument(
+        "--stats",
+        default="",
+        help="stats JSON; default: the local checkpoint's own (Triton: channel_stats.json)",
+    )
+    p_detect.add_argument("--device", default="cpu", help="Torch device for local serving")
     p_detect.add_argument("--triton-url", default="", help="Triton gRPC endpoint")
+    return parser
 
-    args = parser.parse_args()
+
+def main(argv: list[str] | None = None) -> None:
+    args = build_parser().parse_args(argv)
 
     if args.command == "full":
         full_pipeline_flow(
@@ -298,11 +381,12 @@ if __name__ == "__main__":
             aoi_config_path=args.aoi_config,
             date_range=args.date_range,
             known_sites_path=args.known_sites,
+            max_scenes=args.max_scenes,
         )
     elif args.command == "train":
         train_flow(
             manifest_path=args.manifest,
-            known_sites_path=args.known_sites,
+            stats_path=args.stats,
             epochs=args.epochs,
             batch_size=args.batch_size,
             gpus=args.gpus,
@@ -312,6 +396,13 @@ if __name__ == "__main__":
             aoi_config_path=args.aoi_config,
             checkpoint_path=args.checkpoint,
             model_version=args.model_version,
+            stats_path=args.stats,
+            device=args.device,
+            known_sites_path=args.known_sites,
             serving_mode=args.serving_mode,
             triton_url=args.triton_url,
         )
+
+
+if __name__ == "__main__":
+    main()

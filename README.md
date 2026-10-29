@@ -1,566 +1,255 @@
 # Launch Site Detection (OSINT)
 
-Geospatial ML pipeline that detects static missile/rocket launch sites from open satellite imagery (Sentinel-2 + Sentinel-1). Candidates are surfaced through a FastAPI backend and explored on an interactive MapLibre web map.
+A geospatial ML pipeline that looks for rocket and missile launch sites in open Sentinel-2
+imagery. It builds cloud-free reflectance composites over areas of interest, trains a UNet
+segmentation model on weak labels drawn around 18 publicly documented launch sites, scans whole
+composites for candidate sites, stores them in PostGIS and shows them on a MapLibre web map.
+Evaluation is site-held-out; the numbers below are produced by a script in the repo.
+
+![pipeline](docs/img/pipeline.svg)
 
 <p align="center">
-  <img src="docs/lauch_detection_map.png" alt="Launch Site Detection — Web Map" width="800">
+  <img src="docs/lauch_detection_map.png" alt="Launch Site Detection web map" width="800">
 </p>
 
----
+## Results
 
-## Table of contents
+<!-- EVAL:START -->
+_No real-data evaluation yet. `uv run python -m services.training.evaluate --update-readme README.md`
+replaces this block with the validation and test results on the held-out sites._
+<!-- EVAL:END -->
 
-1. [Data](#data)
-2. [ML model](#ml-model)
-3. [Model serving (Triton)](#model-serving-triton)
-4. [Pipeline](#pipeline)
-5. [API](#api)
-6. [Web app](#web-app)
-7. [Infrastructure & tooling](#infrastructure--tooling)
-8. [Benchmarking](#benchmarking)
-9. [Hardware requirements](#hardware-requirements)
-10. [Repository structure](#repository-structure)
-11. [Quick start](#quick-start)
+Until the GPU run is done this block holds the synthetic end-to-end result only:
 
----
+| synthetic, not real imagery | sites | scanned km² | recall@5 | recall@10 | FP / 1000 km² | detections | runtime |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| planted site, validation composite | 1 | 26.2 | 1.00 | 1.00 | 0.0 | 1 | 23 s (16 cores, CPU) |
+
+Source: [`tests/integration/test_synthetic_pipeline.py`](tests/integration/test_synthetic_pipeline.py).
+Two synthetic 6-band reflectance composites (10 channels after indices), each with one planted
+bright square "site", are chipped,
+labelled, split by site, normalised with stats from the training composite only, used to train a
+ResNet-18 UNet for two epochs on CPU, then scanned with the same sliding window and
+postprocessing that production uses. After deduplication 1 detection remains on the planted
+site; with a 2 km merge radius on a 5 km raster, FP = 0 here says little. This proves that the stages fit together; it says nothing about detection skill on
+real imagery.
+
+## What changed in v0.2 and why
+
+- **Radiometry is consistent.** Clouds are masked from the SCL band at ingest, digital numbers
+  become reflectance with the per-scene scale and offset, and composites are NaN-medians tagged
+  with their band order. v0.1 mixed raw DNs, clouds and per-tile stretches.
+- **One normalisation.** Per-channel statistics are computed once from training composites and
+  used unchanged in training, evaluation, local inference and the ONNX export.
+- **Labels are in metres.** Circles around known sites are drawn in a local azimuthal equidistant
+  projection with a positive core, an ignore ring (loss weight 0) and negatives beyond; v0.1 drew
+  them in degrees.
+- **Splits hold out whole sites.** Three test and three validation sites with a 20 km exclusion
+  zone, and 17 AOIs so that every one of the 18 sites has imagery. v0.1 split random tiles, so
+  neighbouring tiles of the same site sat in train and test.
+- **Evaluation measures what matters.** `evaluate.py` reports site recall@K, false positives per
+  1000 km² and a reliability table, and the checkpoint is chosen by validation site recall.
+- **One code path each.** One training loop (`fit()`), one sliding window with a pluggable
+  `Predictor` (local PyTorch or Triton), one immutable `Detection` with separate `prob` and
+  `rank_score`.
+- **The API and map show real evidence.** Thumbnails render from the stored composite
+  (`?mode=rgb|nir`), vector tiles filter on `min_score`, known sites are seeded into the database.
+- **Less code, more tests.** Sentinel-1, the dual-encoder model and the async Triton client are
+  gone; unit tests, a synthetic end-to-end test, PostGIS API tests and CI were added. The
+  end-to-end test found a real bug: UTM chip bounds were read as lon/lat by the split assignment.
 
 ## Data
 
-### Sources
+Sentinel-2 L2A from the [Microsoft Planetary Computer](https://planetarycomputer.microsoft.com/api/stac/v1)
+STAC API: blue, green, red, NIR (10 m) and SWIR 1.6/2.2 µm (20 m, resampled to 10 m).
 
-| Sensor | Collection | Resolution | Bands used |
-|---|---|---|---|
-| **Sentinel-2 L2A** (optical) | `sentinel-2-l2a` | 10 m | B02, B03, B04 (visible), B08 (NIR), B11/B12 (SWIR) |
-| **Sentinel-1 RTC** (SAR, optional) | `sentinel-1-rtc` | 10 m | VV, VH |
+Processing chain:
 
-All imagery is discovered and downloaded via the [Microsoft Planetary Computer](https://planetarycomputer.microsoft.com/api/stac/v1) STAC API as Cloud-Optimized GeoTIFFs (COGs).
+1. **Ingest.** STAC search per AOI and date range. Each AOI gets one target grid (10 m, UTM zone
+   of its centre), and every band and the SCL of every scene are warped onto it, so scenes from
+   neighbouring MGRS tiles or UTM zones line up pixel for pixel. Pixels outside the clear classes
+   (4 to 7), or outside the scene, become NaN at ingest.
+   Digital numbers become reflectance with `scale_offset_for`: DN × 1e-4, with an offset of −0.1
+   for processing baseline 04.00 and later (Planetary Computer items carry no `raster:bands`, so
+   the baseline decides).
+2. **Composite.** Per-pixel NaN-median over the scenes of an AOI, in blocks of 512 rows; scenes
+   on different grids are rejected. Every composite carries a
+   `BANDSPEC` tag with the band names in order; readers refuse untagged composites.
+3. **Normalise.** `data/manifests/channel_stats.json` holds per-channel p2/p98 and the mean and
+   standard deviation after clipping, computed on training-AOI composites only; training embeds
+   them in the checkpoint, and inference and evaluation use the checkpoint's copy (a stats file
+   given as well must match it). One function,
+   `normalize(array, stats)`, clips each channel to its p2/p98 range and standardises it. Four
+   spectral indices (NDVI, NDWI, NDBI, BSI) are computed from reflectance first, giving 10 input
+   channels.
+4. **Chips and labels.** 256 × 256 px chips (2.56 km at 10 m) with 32 px overlap. Each label is a
+   GeoTIFF on the chip's grid with values 0 (negative), 0.5 (ignore) and 1 (positive). The
+   positive disc has the site's `buffer_km` radius (1 to 5 km, default 2 km); the ignore ring
+   extends to twice that radius and gets loss weight 0. Circles are drawn in metres in a local
+   azimuthal equidistant projection.
+5. **Splits.** Defined by site in [`data/manifests/splits.json`](data/manifests/splits.json).
+   Test: Satish Dhawan, Tanegashima, Guiana. Validation: Xichang, Plesetsk, Sohae. The remaining
+   12 sites are for training. Each AOI belongs to one split (that of the site nearest its
+   centre); every chip of a held-out AOI belongs to that split; background chips of training AOIs
+   train. A chip within 20 km of a site follows that site's split. The 17 AOIs are in [`data/manifests/aoi_config.json`](data/manifests/aoi_config.json).
 
-### Processing chain
+See the [dataset card](docs/dataset-card.md) for details.
 
-1. **STAC search** — query by AOI bounding box and date range, download cropped scenes in parallel.
-2. **Cloud masking** — Sentinel-2 Scene Classification Layer (SCL) keeps only clear-sky pixels (classes 4-7).
-3. **Temporal compositing** — pixel-wise median (or mean) across the time window to produce a single cloud-free mosaic.
-4. **Radiometric normalisation** — per-band 2nd–98th percentile stretch to `[0, 1]`.
-5. **Spectral indices** — NDVI, NDWI, NDBI and BSI are appended, expanding 6 raw bands to **10 input channels**.
-6. **Tiling** — composites are cut into **256 × 256 px** chips (2.56 km² at 10 m GSD) with a 32 px overlap.
-7. **Weak label generation** — binary masks derived from known launch-site buffers (default 2 km radius), with values `{0, 0.5, 1}`.
+## Model
 
-### Storage layout
-
-```
-data/
-  raw/{aoi}/sentinel2/    # downloaded GeoTIFFs
-  composites/             # temporal median composites
-  tiles/{aoi}/            # 256×256 chips + label masks
-  predictions/            # single-band probability rasters (float32)
-  manifests/              # dataset split JSONs, AOI configs, known-sites list
-```
-
-Metadata and detections live in **PostgreSQL + PostGIS** (EPSG 4326). Object storage for rasters is provided by **MinIO**.
-
----
-
-## ML model
-
-### Architecture
-
-The default model is a **UNet with a ResNet-34 encoder** (ImageNet-pretrained) built with [`segmentation-models-pytorch`](https://github.com/qubvel-org/segmentation_models.pytorch). An alternative **DeepLabV3+ (ResNet-50)** is also available for a larger receptive field.
-
-| Parameter | Value |
-|---|---|
-| Input shape | `(10, 256, 256)` — 6 bands + 4 indices |
-| Output | 1-channel sigmoid probability map |
-| Encoder weights | ImageNet |
-| Framework | PyTorch Lightning ≥ 2.2 |
-
-An experimental `DualEncoderUNet` (separate optical + SAR branches) is defined but not used in the default pipeline.
-
-### Training
-
-| Setting | Value |
-|---|---|
-| Optimiser | AdamW — lr 1e-3, weight decay 1e-4 |
-| LR schedule | ReduceLROnPlateau — patience 5, factor 0.5 |
-| Loss | **Focal** (α 0.25, γ 2.0, label smoothing 0.05) **+ Dice** (weight 0.5) |
-| Batch size | 16 |
-| Max epochs | 50 |
-| Precision | mixed-16 on GPU, 32-bit on CPU |
-| Augmentation | random 90° rotations, horizontal & vertical flips |
-| Data split | 70 % train / 15 % val / 15 % test (stratified by positive/negative) |
-| Callbacks | ModelCheckpoint (top-3), EarlyStopping (patience 10) |
-| Tracking | MLflow (`http://localhost:5000`) |
-
-### Inference
-
-- **Sliding window** over the full composite: 256 × 256 tiles, 64 px overlap, batches of 8.
-- Output probability raster → threshold at 0.5 → connected components → polygonisation.
-- Candidate polygons are scored by mean probability, area and compactness, then deduplicated with DBSCAN.
-- Two inference backends are available: **local** (in-process PyTorch, the default fallback) and **Triton** (remote NVIDIA Triton Inference Server with dynamic batching). See [Model serving](#model-serving-triton) below.
-
----
-
-## Model serving (Triton)
-
-The inference path can be offloaded to [NVIDIA Triton Inference Server](https://developer.nvidia.com/triton-inference-server), which provides GPU-accelerated model serving with automatic request batching. This decouples model execution from the pipeline client and improves throughput for large-area scans.
-
-### ONNX export
-
-The trained Lightning checkpoint is exported to ONNX with a dynamic batch axis so Triton can batch incoming tile requests server-side:
+Unchanged architecture: a UNet with a ResNet-34 encoder (ImageNet weights) from
+`segmentation-models-pytorch`, 10 input channels, one logit per pixel; DeepLabV3+ is an option.
+The loss is focal (α 0.25, γ 2) plus 0.5 × soft Dice, both weighted per pixel so the ignore ring
+contributes nothing; there is no label smoothing. AdamW (lr 1e-3, weight decay 1e-4),
+ReduceLROnPlateau, flips and 90° rotations. The checkpoint monitor is `val/site_recall@10` on the
+validation AOIs' composites (it falls back to `val/loss` when no validation composites are
+given), with early stopping on the same metric. Site-level validation runs on a single device
+(global rank 0) and fails the run if it breaks. See the [model card](docs/model-card.md).
 
 ```bash
-python -m services.serving.export_model \
-    --checkpoint checkpoints/best.ckpt \
-    --output model_repository/unet_seg/1/model.onnx
+uv run python -m services.training.train_cli --manifest data/manifests/chip_manifest.json \
+  --stats data/manifests/channel_stats.json --epochs 40 --gpus 1 --precision 16-mixed \
+  --val-composite data/composites/xichang_composite.tif  # repeat per validation AOI
 ```
 
-The export step validates the ONNX model by comparing its output against PyTorch (atol = 1e-5) and tests dynamic batch sizes from 1 to 32.
+## Evaluation
 
-### Model repository
+`services/training/evaluate.py` runs the production sliding window and postprocessing over the
+composites of a split and compares the detections with that split's known sites. A detection
+matches a site when its centroid is within 5 km.
 
-Triton loads the model from the `model_repository/` directory at the project root:
-
-```
-model_repository/
-  unet_seg/
-    config.pbtxt       # model config (ONNX Runtime backend, dynamic batching)
-    1/
-      model.onnx       # exported model (created by export step above)
-```
-
-The `config.pbtxt` configures:
-
-| Setting | Value |
-|---|---|
-| Backend | ONNX Runtime |
-| Max batch size | 32 |
-| Dynamic batching | Preferred sizes 8, 16, 32 — max queue delay 50 ms |
-| Instance group | 1 × GPU |
-| Input | `(B, 10, 256, 256)` float32 |
-| Output | `(B, 1, 256, 256)` float32 (logits; sigmoid applied client-side) |
-
-### Triton client
-
-`services/serving/triton_client.py` provides two client classes:
-
-- **`TritonSegClient`** — synchronous gRPC client with retry logic and exponential backoff. Used by the pipeline tasks.
-- **`AsyncTritonSegClient`** — async gRPC client for concurrent tile submission.
-
-Both clients construct Triton `InferInput`/`InferRequestedOutput` tensors, send batches over gRPC, and apply sigmoid to the returned logits.
-
-The function `triton_sliding_window_inference()` is a drop-in replacement for the original `sliding_window_inference()` — same windowing, overlap accumulation and GeoTIFF output, but inference is handled by Triton instead of a local PyTorch model.
-
-### Memory-optimised inference
-
-For large-area satellite scans (e.g. a 1-degree AOI at 10 m GSD ≈ 11,000 × 11,000 px), the standard in-memory `prob_map` / `count_map` arrays consume ~0.9 GB of RAM. `services/serving/memory_optimized.py` addresses this with:
-
-- **Memory-mapped accumulation** — `prob_map` and `count_map` use `np.memmap` backed by temporary files, letting the OS manage paging.
-- **Horizontal strip processing** — the raster is processed in strips whose height is auto-tuned to fit within a configurable memory budget (`max_memory_mb`, default 512 MB).
-- **Streaming tile reader** — tiles are read, preprocessed, sent to Triton and discarded immediately; no tile list is accumulated in memory.
-
-### Running Triton locally
+- **recall@K** (K = 5, 10, 20): the fraction of the split's sites matched by at least one of the
+  K highest-ranked detections (ranked by `rank_score`).
+- **FP per 1000 km²**: detections that match no site, per 1000 km² of scanned composite (pixels
+  with data only).
+- **Reliability**: detections binned by `prob` (never `rank_score`), with the fraction of each bin
+  that matches a site, to check whether the probability means what it says.
 
 ```bash
-# 1. Export the model
-python -m services.serving.export_model --checkpoint checkpoints/best.ckpt
-
-# 2. Start Triton (requires nvidia-container-toolkit)
-docker compose -f infra/docker-compose.yml up -d triton
-
-# 3. Verify readiness
-curl http://localhost:8000/v2/health/ready       # HTTP 200
-curl http://localhost:8000/v2/models/unet_seg     # model metadata
-
-# 4. Run inference via Triton
-TRITON_URL=localhost:8001 python -m services.pipeline.flows detect --serving-mode triton
+uv run python -m services.training.evaluate --checkpoint checkpoints/<best>.ckpt \
+  --split val --split test --update-readme README.md
 ```
 
-For CPU-only testing, edit `model_repository/unet_seg/config.pbtxt` and change `KIND_GPU` to `KIND_CPU`, then run the Triton container without GPU reservation.
+Results go to `out/eval/{val,test}.json`; `--update-readme` rewrites the Results block above.
 
----
+## Inference and serving
 
-## Pipeline
+There is one sliding window, `libs.inference.sliding_window.run_sliding_window`: 256 px windows
+with 64 px overlap, averaged in an `Accumulator`. With `memmap=True` the accumulation maps live on
+disk and the raster is finalised and written in row strips. Pixels whose composite has
+no data (NaN) stay NaN in the probability raster. The model sits behind a
+`Predictor` protocol: `LocalTorchPredictor` (in-process PyTorch, any device) or `TritonPredictor`
+(NVIDIA Triton over gRPC). Postprocessing thresholds the probability raster, polygonises it,
+gives each polygon its mean `prob` and a `rank_score` (probability, compactness and an area
+prior) and merges detections within 2 km (DBSCAN in metres). Polygons are reprojected to
+EPSG:4326 for storage; area and compactness are measured in the composite's projected CRS.
 
-The orchestration layer uses [Prefect](https://www.prefect.io/) (≥ 2.14). Four flows can be run individually or chained.
-
-```
-┌─────────────────────┐     ┌──────────────────┐     ┌─────────────────────┐
-│  ingest-and-        │     │  train-model-     │     │  scan-and-detect-   │
-│  preprocess-flow    │────▶│  flow             │────▶│  flow               │
-│                     │     │                   │     │                     │
-│  STAC download      │     │  Lightning train  │     │  Sliding-window     │
-│  Cloud mask         │     │  MLflow logging   │     │  inference          │
-│  Composite          │     │  Returns best     │     │  Postprocess        │
-│  Tile + labels      │     │  checkpoint path  │     │  Store in PostGIS   │
-└─────────────────────┘     └──────────────────┘     └─────────────────────┘
-
-                    full-pipeline-flow (end-to-end)
-                    supports --skip-ingest / --skip-training
-```
-
-### Key tasks
-
-| Task | Retries | Purpose |
-|---|---|---|
-| `ingest_aoi_task` | 2 | STAC search + parallel download |
-| `build_composite_task` | 0 | Temporal median/mean compositing |
-| `tile_composite_task` | 0 | 256×256 tiling with overlap |
-| `build_labels_task` | 0 | Weak-label mask generation |
-| `train_model_task` | 0 | PyTorch Lightning training loop |
-| `run_inference_task` | 0 | Batch sliding-window prediction (local PyTorch) |
-| `run_triton_inference_task` | 0 | Sliding-window prediction via Triton (standard or memory-optimised) |
-| `postprocess_task` | 0 | Threshold, extract, score, deduplicate |
-| `store_detections_task` | 0 | Insert polygons into PostGIS |
-
-The `scan_and_detect_flow` accepts a `--serving-mode` flag (`local` or `triton`). When omitted, it auto-detects: if the `TRITON_URL` environment variable is set, Triton is used; otherwise inference falls back to local PyTorch.
+For Triton, `export_model` writes an ONNX model with a dynamic batch axis, validates it against
+PyTorch, embeds the normalisation stats and band spec in the ONNX metadata and copies the stats
+file next to the model:
 
 ```bash
-python -m services.pipeline.flows [full|ingest|train|detect]
-
-# Detect with Triton
-python -m services.pipeline.flows detect --serving-mode triton --triton-url localhost:8001
-
-# Or via environment variable
-TRITON_URL=localhost:8001 python -m services.pipeline.flows detect
+uv run python -m services.serving.export_model --checkpoint checkpoints/<best>.ckpt
+docker compose -f infra/docker-compose.yml up -d triton   # needs nvidia-container-toolkit
+TRITON_URL=localhost:8001 uv run python -m services.pipeline.flows detect --serving-mode triton
 ```
 
----
+The model repository config is in [`model_repository/unet_seg/config.pbtxt`](model_repository/unet_seg/config.pbtxt)
+(ONNX Runtime backend, max batch 32, dynamic batching). A benchmark harness compares local and
+Triton inference: `uv run python -m benchmarks.inference_benchmark --help`.
 
-## API
+## Pipeline, API, web
 
-A **FastAPI** (≥ 0.110) application served by Uvicorn. CORS is open for local development. The database layer uses SQLAlchemy + GeoAlchemy2.
+**Pipeline.** Prefect flows in [`services/pipeline/flows.py`](services/pipeline/flows.py):
 
-### Endpoints
+```bash
+uv run python -m services.pipeline.flows ingest --max-scenes 20   # STAC -> composites -> chips, labels, splits, stats
+uv run python -m services.pipeline.flows train                    # fit() with the validation AOIs' composites
+uv run python -m services.pipeline.flows detect                   # seed known sites, scan, postprocess, store
+uv run python -m services.pipeline.flows full                     # all three
+```
+
+`detect` uses Triton when `TRITON_URL` is set or `--serving-mode triton` is given, otherwise local
+PyTorch.
+
+**API.** FastAPI on PostGIS (`uv run uvicorn services.api.main:app --reload`):
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/health` | Status, version, detection count, Triton readiness (when `TRITON_URL` is set) |
-| `GET` | `/detections` | List detections — filter by bounding box, `min_score` (0-1), `limit`, `offset` |
-| `GET` | `/detections/{id}` | Single detection with full GeoJSON geometry |
-| `GET` | `/known-sites` | All reference launch sites (name, country, coordinates) |
-| `GET` | `/evidence/{id}` | Evidence metadata (score, model version, geometry, JSONB payload) |
-| `GET` | `/evidence/{id}/thumbnail` | False-colour RGB thumbnail (PNG, 256×256 default, configurable 64-1024 px) |
-| `GET` | `/tiles/{z}/{x}/{y}.pbf` | Mapbox Vector Tiles generated on-the-fly via `ST_AsMVT` (score ≥ 0.1, 1 h cache) |
+| `GET` | `/health` | Status, version, detection count, Triton readiness when `TRITON_URL` is set |
+| `GET` | `/detections` | Detections in a bounding box; `min_score`, `limit`, `offset`; each has `score` (rank score) and `prob` (mean model probability) |
+| `GET` | `/detections/{id}` | One detection with its GeoJSON geometry |
+| `GET` | `/known-sites` | Reference launch sites |
+| `GET` | `/evidence/{id}` | Evidence metadata: composite path, bbox, `prob`, rank breakdown, model version, scan date |
+| `GET` | `/evidence/{id}/thumbnail` | PNG cut from the stored composite; `mode=rgb` (true colour) or `mode=nir` (false colour), 64 to 1024 px |
+| `GET` | `/tiles/{z}/{x}/{y}.pbf` | Vector tiles via `ST_AsMVT`, filtered by `min_score` (rank score, default 0.1) |
 
-### Data models (PostGIS)
+**Web.** A MapLibre + Vite single-page map (`cd services/web && npm install && npm run dev`):
+detections from the vector tiles, a score slider, known-site and heatmap toggles, and a detail
+panel with the evidence thumbnail.
 
-| Table | Key columns |
-|---|---|
-| `detections` | `geom` (POLYGON), `score`, `model_version`, `evidence` (JSONB), `area_km2`, `compactness` |
-| `known_sites` | `geom` (POINT), `buffer_geom` (POLYGON), `name`, `country`, `source` |
-| `imagery_catalog` | `scene_id`, `sensor`, `acquired_date`, `bbox`, `cloud_cover_pct`, `cog_path` |
-
-```bash
-uvicorn services.api.main:app --reload
-```
-
----
-
-## Web app
-
-An interactive single-page map built with **MapLibre GL** (≥ 4.1) and bundled by **Vite** (≥ 5.4).
-
-### Map layers
-
-| Layer | Rendering | Details |
-|---|---|---|
-| **Basemap** | CARTO Dark Matter raster tiles | Dark theme for contrast |
-| **Detections** | Score-scaled circles (4-12 px) | Gray → Amber → Red as score rises (0 → 0.9+) |
-| **Heatmap** (toggle) | Purple gradient | Alternative view of detection density |
-| **Known sites** (toggle) | Cyan circles + labels | Reference launch sites with name & country |
-
-Detection circles and the heatmap are fed by the MVT vector-tile endpoint for efficient rendering at any zoom level.
-
-### Controls
-
-- **Score slider** — filter visible detections by minimum confidence (0.0–1.0).
-- **Known-sites toggle** — show or hide the reference site layer.
-- **Heatmap toggle** — switch between individual circles and a density heatmap.
-
-### Detail panel
-
-Clicking a detection opens a side panel showing:
-
-- Detection ID, confidence score, area (km²), compactness
-- Model version and detection date
-- Centroid coordinates
-- False-colour evidence thumbnail fetched from `/evidence/{id}/thumbnail`
-
-### Data flow
-
-1. On load — fetch known sites and detections for the initial viewport.
-2. On pan/zoom — re-fetch detections for the new bounding box.
-3. Vector tiles stream in from `/tiles/{z}/{x}/{y}.pbf` as the user navigates.
-
-```bash
-cd services/web && npm install && npm run dev
-```
-
----
-
-## Infrastructure & tooling
+**Infrastructure.** [`infra/docker-compose.yml`](infra/docker-compose.yml) runs PostGIS, MinIO,
+MLflow and Triton. Settings live in [`libs/config.py`](libs/config.py) and can be overridden with
+environment variables or `.env` (see [`.env.example`](.env.example)).
 
 <p align="center">
-  <img src="docs/architecture.png" alt="System Architecture" width="800">
+  <img src="docs/architecture.png" alt="System architecture" width="700">
 </p>
 
-Everything runs locally via a single `docker compose` file (`infra/docker-compose.yml`) that spins up four services.
-
-### Docker Compose services
-
-| Service | Image | Ports | Role |
-|---|---|---|---|
-| **PostgreSQL + PostGIS** | `postgis/postgis:16-3.4` | `5432` | Relational store for detections, known sites, imagery catalog and tiles. PostGIS enables spatial queries (`ST_AsMVT`, GIST indexes). Initialised automatically by `infra/postgres-init/001_schema.sql`. |
-| **MinIO** | `minio/minio:latest` | `9000` (S3 API), `9001` (console) | S3-compatible object store. Holds raw GeoTIFFs, composites and MLflow model artefacts. Default bucket: `imagery`. |
-| **MLflow** | `ghcr.io/mlflow/mlflow:v2.10.0` | `5000` | Experiment tracker. Backend store in Postgres, artefact store in MinIO (`s3://mlflow-artifacts/`). Logs metrics, hyperparameters and model checkpoints for every training run. |
-| **Triton Inference Server** | `nvcr.io/nvidia/tritonserver:24.01-py3` | `8000` (HTTP), `8001` (gRPC), `8002` (Prometheus metrics) | GPU-accelerated model serving with dynamic request batching. Loads the ONNX UNet from `model_repository/unet_seg/`. Requires `nvidia-container-toolkit`. |
-
-Data volumes (`pgdata`, `minio_data`) are persisted across restarts.
-
-### Configuration
-
-All connection strings are centralised in `libs/config.py` via a `pydantic-settings` `BaseSettings` class. Defaults point to the Docker Compose services; override with a `.env` file or environment variables.
-
-| Variable | Default | Description |
-|---|---|---|
-| `POSTGRES_HOST` | `localhost` | Database host |
-| `POSTGRES_PORT` | `5432` | Database port |
-| `POSTGRES_DB` | `launchsite` | Database name |
-| `MINIO_ENDPOINT` | `localhost:9000` | MinIO S3 endpoint |
-| `MINIO_BUCKET` | `imagery` | Default bucket for rasters |
-| `MLFLOW_TRACKING_URI` | `http://localhost:5000` | MLflow server URL |
-| `TRITON_URL` | *(unset)* | Triton gRPC endpoint (e.g. `localhost:8001`). When set, the pipeline and health endpoint use Triton automatically. |
-
-### Tooling overview
-
-| Tool | Version | Purpose |
-|---|---|---|
-| [Prefect](https://www.prefect.io/) | ≥ 2.14 | Workflow orchestration — defines flows and tasks with retries, logging and dependency management. |
-| [MLflow](https://mlflow.org/) | ≥ 2.10 | Experiment tracking — logs training metrics (F1, AUROC, loss curves), hyperparameters and model checkpoints. |
-| [PyTorch Lightning](https://lightning.ai/) | ≥ 2.2 | Training framework — handles the training loop, mixed-precision, callbacks (checkpoint, early stopping) and multi-GPU. |
-| [segmentation-models-pytorch](https://github.com/qubvel-org/segmentation_models.pytorch) | ≥ 0.3.3 | Pretrained encoder architectures (ResNet-34/50) and segmentation heads (UNet, DeepLabV3+). |
-| [NVIDIA Triton Inference Server](https://developer.nvidia.com/triton-inference-server) | 24.01 | GPU model serving with dynamic request batching, gRPC/HTTP endpoints and Prometheus metrics. |
-| [ONNX](https://onnx.ai/) / ONNX Runtime | ≥ 1.15 / ≥ 1.17 | Model interchange format and inference engine used as the Triton backend. |
-| [tritonclient](https://github.com/triton-inference-server/client) | ≥ 2.42 | Python gRPC/HTTP client for communicating with Triton Inference Server. |
-| [pystac-client](https://pystac-client.readthedocs.io/) | ≥ 0.8 | STAC API client for discovering Sentinel scenes on Microsoft Planetary Computer. |
-| [rasterio](https://rasterio.readthedocs.io/) / rioxarray | ≥ 1.3 | GeoTIFF I/O, reprojection, windowed reads. |
-| [GeoPandas](https://geopandas.org/) / Shapely | ≥ 0.14 | Vector geometry operations (buffering, intersection, polygonisation). |
-| [FastAPI](https://fastapi.tiangolo.com/) + Uvicorn | ≥ 0.110 | Async HTTP API with auto-generated OpenAPI docs. |
-| [SQLAlchemy](https://www.sqlalchemy.org/) + GeoAlchemy2 | ≥ 2.0 | ORM with spatial column support for PostGIS. |
-| [MapLibre GL](https://maplibre.org/) | ≥ 4.1 | WebGL map rendering in the browser (vector tiles, GeoJSON, heatmaps). |
-| [Vite](https://vitejs.dev/) | ≥ 5.4 | Frontend dev server and production bundler. |
-
-### Database schema
-
-Four tables are created at first boot by `001_schema.sql`:
-
-```
-imagery_catalog   scenes discovered via STAC (scene_id, sensor, date, bbox, COG path)
-tiles             256×256 chips with train/val/test split
-detections        model output polygons with score, area and evidence JSONB
-known_sites       reference launch sites with point + buffer geometries
-```
-
-All geometry columns use EPSG 4326 and are GIST-indexed for fast spatial lookups.
-
----
-
-## Benchmarking
-
-A benchmark harness in `benchmarks/inference_benchmark.py` compares inference throughput, latency and memory usage across three modes:
-
-| Mode | Description |
-|---|---|
-| `baseline` | Original in-process PyTorch sliding window (CPU or GPU) |
-| `triton` | Triton Inference Server with dynamic batching |
-| `triton_memopt` | Triton + memory-mapped accumulation + strip processing |
-
-### Running benchmarks
+## Development
 
 ```bash
-# Baseline only (no Triton needed)
-python -m benchmarks.inference_benchmark \
-    --modes baseline \
-    --checkpoint checkpoints/best.ckpt \
-    --device cpu \
-    --raster-sizes 1024,4096 \
-    --batch-sizes 8,16
-
-# Full comparison (Triton must be running)
-python -m benchmarks.inference_benchmark \
-    --modes baseline,triton,triton_memopt \
-    --checkpoint checkpoints/best.ckpt \
-    --triton-url localhost:8001 \
-    --device cuda \
-    --raster-sizes 1024,4096,11000 \
-    --batch-sizes 1,8,16,32 \
-    --overlaps 0,32,64
-```
-
-When `--raster` is omitted, synthetic multi-band GeoTIFFs are generated automatically at the requested sizes.
-
-### Metrics collected
-
-| Metric | Source |
-|---|---|
-| Wall-clock time, tiles/sec | `time.perf_counter` |
-| Per-batch latency (p50 / p95 / p99) | Timed per Triton gRPC call |
-| Peak RSS | `resource.getrusage` |
-| Peak Python allocations | `tracemalloc` |
-| GPU utilisation | `pynvml` (when available) |
-
-Results are saved to `benchmarks/results/benchmark_results.json` and printed as a summary table.
-
----
-
-## Hardware requirements
-
-The full pipeline (ingest + train + detect) is **not designed for a laptop**. While the API, web map and Docker services are lightweight, the data volumes and compute demands of ingestion and training require a proper workstation or cloud VM.
-
-### Data volume estimates
-
-The default AOI config defines four regions totalling ~33,000 km² of ground coverage. At 10 m GSD with up to 50 Sentinel-2 scenes per AOI over a 6-month window:
-
-| Stage | Per AOI | 4 AOIs (total) |
-|---|---|---|
-| Raw scene downloads (6 bands, uint16, deflate) | 25–40 GB | **80–150 GB** |
-| Temporal composites (float32, 6 bands) | 1–3 GB | ~5–10 GB |
-| Tiles (256×256, 10 channels float32) + labels | 3–6 GB | ~10–20 GB |
-| Predictions + PostGIS + MLflow artifacts | 1–2 GB | ~3–5 GB |
-| **Total disk footprint** | | **~100–180 GB** |
-
-### Compute bottlenecks
-
-| Stage | What hurts | Why |
-|---|---|---|
-| **Ingestion** | Network I/O, disk | Downloads tens of GB from Planetary Computer via concurrent HTTP reads (4 scenes × 6 bands in parallel). |
-| **Compositing** | RAM | Loads all scenes for an AOI into memory for pixel-wise median — the largest AOI (Baikonur, ~12,700 km²) can require 30–60 GB of RAM. |
-| **Training** | GPU (or CPU time) | ResNet-34 UNet, 10-channel 256×256 tiles, batch 16, up to 50 epochs. On CPU this takes hours to days; on a mid-range GPU it finishes in under an hour. |
-| **Inference** | GPU (or CPU time) | Sliding window over full composites produces thousands of 256×256 patches per AOI. |
-
-### Minimum and recommended specs
-
-| Resource | Minimum (will be slow) | Recommended |
-|---|---|---|
-| **GPU** | None (CPU-only, `gpus=0`) | NVIDIA GPU with ≥ 8 GB VRAM (e.g. RTX 3060 12 GB, T4, A10G) |
-| **RAM** | 16 GB | 32–64 GB |
-| **Disk** | 200 GB free (SSD) | 500 GB+ SSD |
-| **CPU** | 4 cores | 8+ cores (helps with data loaders and parallel downloads) |
-| **Network** | Broadband | ≥ 100 Mbps (large COG downloads from Planetary Computer) |
-
-### Suggested cloud instances
-
-| Provider | Instance | GPU | RAM | Notes |
-|---|---|---|---|---|
-| AWS | `g5.2xlarge` | A10G 24 GB | 32 GB | Good balance of GPU and RAM |
-| GCP | `n1-standard-8` + T4 | T4 16 GB | 30 GB | Attach a 500 GB persistent SSD |
-| Azure | `Standard_NC8as_T4_v3` | T4 16 GB | 56 GB | Generous RAM for compositing |
-
-### What runs fine on a laptop
-
-The **API + web map** are lightweight and work well on any machine. For local development without running the pipeline, use the minimal quick start (`--skip-ingest --skip-training`) with pre-computed data or an empty database.
-
----
-
-## Repository structure
-
-```
-services/
-  api/            # FastAPI endpoints + SQLAlchemy models
-  pipeline/       # Prefect flows & tasks (local + Triton inference)
-  training/       # PyTorch Lightning training, model definitions, inference
-  serving/        # Triton client, ONNX export, memory-optimised inference
-  web/            # MapLibre + Vite frontend
-libs/
-  geo/            # Tiling, projections, cloud masks, postprocessing
-  stac/           # STAC discovery + download client
-  features/       # Spectral indices (NDVI, NDWI, NDBI, BSI)
-  config.py       # Central settings (Postgres, MinIO, MLflow)
-infra/
-  docker-compose.yml   # Postgres/PostGIS, MinIO, MLflow, Triton
-  postgres-init/       # SQL schema (001_schema.sql)
-model_repository/
-  unet_seg/       # Triton model config + ONNX model (version 1/)
-benchmarks/
-  inference_benchmark.py   # Throughput / latency / memory comparison harness
-  results/                 # JSON benchmark output
-data/
-  manifests/      # Dataset splits, AOI configs, known-sites list
-```
-
----
-
-## Quick start
-
-### Minimal (API + web map only, no pipeline)
-
-Useful to explore the UI or develop against an empty (or pre-seeded) database without waiting for imagery ingestion and training.
-
-```bash
-# 1. Start only Postgres/PostGIS (schema is applied automatically)
+uv sync --all-extras
+uv run ruff check . && uv run ruff format --check .
+uv run pytest -q              # unit tests + the synthetic end-to-end test, under a minute
 docker compose -f infra/docker-compose.yml up -d postgres
-
-# 2. Install Python dependencies
-pip install -r requirements.txt
-
-# 3. Start the API
-uvicorn services.api.main:app --reload
-
-# 4. Start the web UI
-cd services/web && npm install && npm run dev
+uv run pytest -m api -q       # API tests on PostGIS, in their own <db>_test database
 ```
 
-The map will load with known sites from `data/manifests/known_sites.json`. The detections layer will be empty until you either run the pipeline or insert rows into the `detections` table manually.
-
-### Full (ingest, train, detect, serve)
+The schema in `infra/postgres-init/001_schema.sql` runs on the database's first boot only. A
+database created before v0.2 lacks the `prob` column and the unique site name the v0.2 pipeline
+writes against; the script is idempotent, so re-apply it to upgrade in place:
 
 ```bash
-# 1. Infrastructure (Postgres/PostGIS, MinIO, MLflow)
-docker compose -f infra/docker-compose.yml up -d postgres minio mlflow
-
-# 2. Install Python dependencies
-pip install -r requirements.txt
-
-# 3. Run the full pipeline (ingest → train → detect)
-python -m services.pipeline.flows full
-
-# 4. Start the API
-uvicorn services.api.main:app --reload
-
-# 5. Start the web UI
-cd services/web && npm install && npm run dev
+docker compose -f infra/docker-compose.yml exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U launchsite -d launchsite < infra/postgres-init/001_schema.sql
 ```
 
-Individual pipeline stages can also be run separately:
+142 tests run by default and 11 API tests run with `-m api`. Coverage is gated at 80 % (94.1 %
+measured) over `libs` and `services`, except for files omitted from that gate in
+`pyproject.toml`: `services/web/*` (JavaScript), `services/pipeline/flows.py` (Prefect wiring),
+`services/serving/export_model.py` (ONNX export), `libs/stac/client.py` (network I/O; its pure
+helpers are unit-tested) and `services/api/*` (needs PostGIS). The API is gated at 80 % by the API
+job instead (90.8 % measured, [`.coveragerc.api`](.coveragerc.api)). CI
+([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) has two jobs: `lint-and-unit` (ruff,
+pytest with the coverage gate) and `api` (pytest `-m api` against a PostGIS service container,
+with its own coverage gate).
 
-```bash
-python -m services.pipeline.flows ingest   # download + preprocess only
-python -m services.pipeline.flows train    # train model only
-python -m services.pipeline.flows detect   # inference + postprocess only
-```
+[`scripts/gpu_day.sh`](scripts/gpu_day.sh) is the runbook for the first real-data run: ingest,
+train, evaluate (which fills the Results block) and export.
 
-### With Triton Inference Server
+## Hardware
 
-```bash
-# 1. Export trained model to ONNX
-python -m services.serving.export_model --checkpoint checkpoints/best.ckpt
+The API, web map and test suite run on a laptop. Ingesting 17 AOIs needs on the order of 100 to
+200 GB of disk and a good connection, and training and large-area inference want a GPU: CPU-only
+runs were too slow ([issue #1](https://github.com/lbougan/launch_detection/issues/1)), so the
+plan is a remote GPU with Triton rather than tuning the CPU path. Data volumes, specs and cloud
+instances are in [docs/hardware.md](docs/hardware.md).
 
-# 2. Start all infrastructure including Triton (requires nvidia-container-toolkit)
-docker compose -f infra/docker-compose.yml up -d
+## Known limitations
 
-# 3. Run detection with Triton-backed inference
-TRITON_URL=localhost:8001 python -m services.pipeline.flows detect
-
-# 4. Start the API (Triton health is reported at /health)
-TRITON_URL=localhost:8001 uvicorn services.api.main:app --reload
-```
-
-### Benchmark inference modes
-
-```bash
-# Compare baseline vs. Triton (Triton must be running)
-python -m benchmarks.inference_benchmark \
-    --modes baseline,triton,triton_memopt \
-    --checkpoint checkpoints/best.ckpt \
-    --triton-url localhost:8001 \
-    --raster-sizes 1024,4096
-```
+- **Weak circular labels.** A disc around a coordinate is a coarse proxy for an irregular
+  footprint; the ignore ring softens but does not fix this.
+- **10 m resolution.** Individual pads and small sites are at or below what Sentinel-2 resolves;
+  the model can only respond to compound-scale structure.
+- **No real-data numbers yet.** The synthetic test proves plumbing, not detection skill. Real
+  results arrive with the GPU run.
+- **Triton is tested with stubs only.** `TritonPredictor` and `TritonSegClient` are unit-tested
+  against stubs; neither has run against a live server here.
+- **Sentinel-1 is not included.** Radar would help under persistent cloud (Guiana, Xichang).
+- **Pipeline import weight.** `services/pipeline/flows.py` imports rasterio at module level
+  through `libs.geo.chips` (torch, Lightning and SQLAlchemy stay lazy).
+- **RAM for compositing.** Composites are float32: a 20-scene large AOI needs roughly 2× the
+  v0.1 RAM figure; compositing runs in row blocks so peak RAM is one block × scenes.
+- **Dedupe chains.** DBSCAN with `min_samples=1` chains nearby candidates: a line of detections
+  each within 2 km of the next collapses into one, however long the line.

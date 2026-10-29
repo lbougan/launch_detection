@@ -1,21 +1,28 @@
-"""STAC discovery and download for Sentinel-2 and Sentinel-1 imagery."""
+"""STAC discovery and download for Sentinel-2 imagery."""
 
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
 import planetary_computer as pc
 import pystac_client
-import numpy as np
 import rasterio
-from pyproj import Transformer
-from rasterio.windows import from_bounds
+from rasterio.crs import CRS
+from rasterio.enums import Resampling
+from rasterio.errors import RasterioIOError
+from rasterio.transform import Affine, from_origin
+from rasterio.vrt import WarpedVRT
+from rasterio.warp import transform_bounds
 
+from libs.geo.bandspec import S2_BAND_NAMES, TAG_KEY, BandSpec, write_bandspec
+from libs.geo.masks import apply_cloud_mask
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +35,53 @@ os.environ.setdefault("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".tif,.tiff")
 STAC_API_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
 
 SENTINEL2_COLLECTION = "sentinel-2-l2a"
-SENTINEL1_COLLECTION = "sentinel-1-rtc"
 
 S2_BANDS = ["B02", "B03", "B04", "B08", "B11", "B12"]
-S2_BAND_NAMES = ["blue", "green", "red", "nir", "swir16", "swir22"]
+DEFAULT_SCALE_OFFSET = (1e-4, 0.0)
+# ESA added a +1000 DN offset from processing baseline 04.00 (25 Jan 2022)
+BASELINE_OFFSET_FROM = 4.0
+BASELINE_OFFSET = -0.1
+__all__ = ["S2_BAND_NAMES"]  # re-exported from libs.geo.bandspec
+
+
+TARGET_RES_M = 10.0
+
+
+@dataclass(frozen=True)
+class Grid:
+    """The one target grid of an AOI: every scene crop is warped onto it."""
+
+    crs: CRS
+    transform: Affine
+    width: int
+    height: int
+
+
+def utm_crs(lon: float, lat: float) -> CRS:
+    """WGS84 / UTM zone of (lon, lat): EPSG 326xx north, 327xx south."""
+    zone = min(max(int((lon + 180.0) // 6.0) + 1, 1), 60)
+    return CRS.from_user_input(f"EPSG:{(32600 if lat >= 0 else 32700) + zone}")
+
+
+def aoi_target_grid(bbox: list[float], res: float = TARGET_RES_M) -> Grid:
+    """UTM grid (zone of the AOI centre) covering the lon/lat bbox, snapped to `res` metres."""
+    west, south, east, north = bbox
+    crs = utm_crs((west + east) / 2.0, (south + north) / 2.0)
+    left, bottom, right, top = _bbox_to_native(bbox, crs)
+    x0, y0 = math.floor(left / res) * res, math.ceil(top / res) * res
+    width = math.ceil((right - x0) / res)
+    height = math.ceil((y0 - bottom) / res)
+    return Grid(crs=crs, transform=from_origin(x0, y0, res, res), width=width, height=height)
+
+
+def crop_matches_grid(path: Path, grid: Grid) -> bool:
+    with rasterio.open(path) as src:
+        return (src.crs, src.transform, src.width, src.height) == (
+            grid.crs,
+            grid.transform,
+            grid.width,
+            grid.height,
+        )
 
 
 @dataclass
@@ -42,6 +92,40 @@ class SceneMetadata:
     bbox: list[float]
     cloud_cover: float | None
     assets: dict[str, str]
+    scales: dict[str, tuple[float, float]] = field(default_factory=dict)
+
+
+def scale_offset_for(asset_extra: dict, properties: dict) -> tuple[float, float]:
+    """Reflectance = DN * scale + offset for one asset.
+
+    Explicit `raster:bands` metadata wins; otherwise the offset follows from the
+    `s2:processing_baseline` item property (-0.1 from baseline 04.00).
+    """
+    rb = (asset_extra.get("raster:bands") or [{}])[0]
+    if "scale" in rb or "offset" in rb:
+        return (
+            float(rb.get("scale", DEFAULT_SCALE_OFFSET[0])),
+            float(rb.get("offset", DEFAULT_SCALE_OFFSET[1])),
+        )
+    baseline = float(properties.get("s2:processing_baseline", "0") or 0)
+    offset = BASELINE_OFFSET if baseline >= BASELINE_OFFSET_FROM else 0.0
+    return (DEFAULT_SCALE_OFFSET[0], offset)
+
+
+def is_pipeline_crop(path: Path) -> bool:
+    """True if the GeoTIFF carries the BANDSPEC tag (v0.1 crops are untagged, unmasked uint16)."""
+    with rasterio.open(path) as src:
+        return TAG_KEY in src.tags()
+
+
+def reusable_crop(path: Path, grid: Grid) -> bool:
+    """True if an existing crop is a pipeline crop on `grid`; a file rasterio cannot open
+    (truncated by an interrupted run) is not reusable and gets re-downloaded."""
+    try:
+        return is_pipeline_crop(path) and crop_matches_grid(path, grid)
+    except RasterioIOError as exc:
+        logger.warning("Existing crop %s is unreadable (%s)", path, exc)
+        return False
 
 
 def get_stac_client() -> pystac_client.Client:
@@ -73,9 +157,11 @@ def search_sentinel2(
     results = []
     for item in search.items():
         assets = {}
+        scales: dict[str, tuple[float, float]] = {}
         for band in S2_BANDS:
             if band in item.assets:
                 assets[band] = item.assets[band].href
+                scales[band] = scale_offset_for(item.assets[band].extra_fields, item.properties)
         if item.assets.get("SCL"):
             assets["SCL"] = item.assets["SCL"].href
 
@@ -87,162 +173,132 @@ def search_sentinel2(
                 bbox=list(item.bbox) if item.bbox else bbox,
                 cloud_cover=item.properties.get("eo:cloud_cover"),
                 assets=assets,
+                scales=scales,
             )
         )
     logger.info("Found %d Sentinel-2 scenes for bbox=%s", len(results), bbox)
     return results
 
 
-def search_sentinel1(
-    bbox: list[float],
-    date_range: str,
-    limit: int = 50,
-) -> list[SceneMetadata]:
-    """Search for Sentinel-1 RTC scenes."""
-    client = get_stac_client()
-    search = client.search(
-        collections=[SENTINEL1_COLLECTION],
-        bbox=bbox,
-        datetime=date_range,
-        max_items=limit,
-    )
-    results = []
-    for item in search.items():
-        assets = {}
-        for key in ("vh", "vv"):
-            if key in item.assets:
-                assets[key] = item.assets[key].href
-
-        results.append(
-            SceneMetadata(
-                scene_id=item.id,
-                sensor="sentinel-1",
-                datetime=item.datetime.isoformat() if item.datetime else "",
-                bbox=list(item.bbox) if item.bbox else bbox,
-                cloud_cover=None,
-                assets=assets,
-            )
-        )
-    logger.info("Found %d Sentinel-1 scenes for bbox=%s", len(results), bbox)
-    return results
-
-
 def _bbox_to_native(
     target_bbox: list[float], src_crs: rasterio.crs.CRS
 ) -> tuple[float, float, float, float]:
-    """Reproject bbox from EPSG:4326 to the raster's native CRS."""
-    west, south, east, north = target_bbox
-    if src_crs and src_crs.to_epsg() != 4326:
-        transformer = Transformer.from_crs("EPSG:4326", src_crs, always_xy=True)
-        west, south = transformer.transform(west, south)
-        east, north = transformer.transform(east, north)
-    return west, south, east, north
+    """Reproject bbox from EPSG:4326 to the raster's native CRS.
+
+    The edges are densified, so the native box encloses the whole lon/lat box (at high latitude
+    its edges bulge in UTM and the two corners alone would clip the crop).
+    """
+    if not src_crs or src_crs == CRS.from_epsg(4326):
+        return tuple(target_bbox)
+    return transform_bounds("EPSG:4326", src_crs, *target_bbox, densify_pts=21)
 
 
-def _read_band(url: str, target_bbox: list[float], out_shape: tuple[int, int]) -> np.ndarray:
-    """Read a single band crop from a remote COG, computing its own window."""
-    with rasterio.open(url) as src:
-        west, south, east, north = _bbox_to_native(target_bbox, src.crs)
-        rb = src.bounds
-        west, south = max(west, rb.left), max(south, rb.bottom)
-        east, north = min(east, rb.right), min(north, rb.top)
-        if west >= east or south >= north:
-            raise ValueError("No spatial overlap")
-        window = from_bounds(west, south, east, north, transform=src.transform)
-        window = window.round_offsets().round_lengths()
-        if window.width < 1 or window.height < 1:
-            raise ValueError("Zero-pixel window")
-        return src.read(1, window=window, out_shape=out_shape)
+def _read_band(url: str, grid: Grid, resampling: Resampling = Resampling.bilinear) -> np.ndarray:
+    """Warp one band of a remote COG onto `grid`; pixels outside the scene come out as 0
+    (the L2A nodata value, SCL class 0), which the cloud mask turns into NaN."""
+    with (
+        rasterio.open(url) as src,
+        WarpedVRT(
+            src,
+            crs=grid.crs,
+            transform=grid.transform,
+            width=grid.width,
+            height=grid.height,
+            resampling=resampling,
+        ) as vrt,
+    ):
+        return vrt.read(1)
+
+
+def assemble_crop(
+    band_arrays: dict[str, np.ndarray],
+    scl: np.ndarray,
+    scales: dict[str, tuple[float, float]],
+) -> np.ndarray:
+    """DN bands -> cloud-masked float32 reflectance cube (C,H,W) in S2_BAND_NAMES order.
+
+    Reflectance = dn * scale + offset per band (fallback (1e-4, 0.0)); pixels that the SCL
+    marks as not clear are NaN in every band.
+    """
+    missing = [b for b in S2_BANDS if b not in band_arrays]
+    if missing:
+        raise ValueError(f"missing bands {missing}")
+    layers = []
+    for band in S2_BANDS:
+        scale, offset = scales.get(band, DEFAULT_SCALE_OFFSET)
+        layers.append(band_arrays[band].astype(np.float32) * scale + offset)
+    return apply_cloud_mask(np.stack(layers), scl)
 
 
 def download_scene_crop(
     scene: SceneMetadata,
-    target_bbox: list[float],
+    grid: Grid,
     output_dir: Path,
-    bands: list[str] | None = None,
     max_workers: int = 6,
 ) -> Path:
-    """Download a cropped region of a scene's bands and stack into a single GeoTIFF.
+    """Warp a scene's bands and SCL onto the AOI grid and write one float32 reflectance GeoTIFF.
 
-    Band reads are parallelized across threads for much faster I/O.
-    Each band computes its own window from the bbox so mixed-resolution
-    bands (10m vs 20m) are handled correctly and resampled to a common grid.
+    Band reads run in parallel threads. Every crop of an AOI lands on the identical grid, whatever
+    the scene's MGRS tile or UTM zone (bilinear for reflectance, nearest for the SCL).
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / f"{scene.scene_id}.tif"
 
     if out_path.exists():
-        logger.debug("Scene %s already downloaded at %s", scene.scene_id, out_path)
-        return out_path
+        if reusable_crop(out_path, grid):
+            logger.debug("Scene %s already downloaded at %s", scene.scene_id, out_path)
+            return out_path
+        logger.warning(
+            "Re-downloading %s: %s is legacy, on another grid or unreadable",
+            scene.scene_id,
+            out_path,
+        )
 
-    asset_keys = bands or list(scene.assets.keys())
-    urls = [(key, scene.assets[key]) for key in asset_keys if key in scene.assets]
-    if not urls:
-        raise ValueError(f"No band URLs for scene {scene.scene_id}")
+    missing = [k for k in S2_BANDS if k not in scene.assets]
+    if missing or "SCL" not in scene.assets:
+        raise ValueError(f"Scene {scene.scene_id} lacks bands {missing} or SCL")
 
-    # Use the first (10m) band to establish the output grid
-    first_url = urls[0][1]
-    with rasterio.open(first_url) as src:
-        src_crs = src.crs
-        west, south, east, north = _bbox_to_native(target_bbox, src_crs)
-        rb = src.bounds
-        west, south = max(west, rb.left), max(south, rb.bottom)
-        east, north = min(east, rb.right), min(north, rb.top)
-        window = from_bounds(west, south, east, north, transform=src.transform)
-        window = window.round_offsets().round_lengths()
-        ref_transform = rasterio.windows.transform(window, src.transform)
-        ref_shape = (int(window.height), int(window.width))
-        profile = src.profile.copy()
+    profile = {
+        "driver": "GTiff",
+        "height": grid.height,
+        "width": grid.width,
+        "count": len(S2_BANDS),
+        "dtype": "float32",
+        "nodata": float("nan"),
+        "transform": grid.transform,
+        "compress": "deflate",
+        "crs": grid.crs,
+    }
 
-    profile.update(
-        driver="GTiff",
-        height=ref_shape[0],
-        width=ref_shape[1],
-        count=len(urls),
-        transform=ref_transform,
-        compress="deflate",
-        crs=src_crs,
-    )
-
-    band_arrays: list[tuple[int, np.ndarray]] = []
-
-    with ThreadPoolExecutor(max_workers=min(max_workers, len(urls))) as pool:
-        futures = {
-            pool.submit(_read_band, url, target_bbox, ref_shape): (idx, key)
-            for idx, (key, url) in enumerate(urls)
-        }
+    arrays: dict[str, np.ndarray] = {}
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(S2_BANDS) + 1)) as pool:
+        futures = {pool.submit(_read_band, scene.assets[key], grid): key for key in S2_BANDS}
+        futures[pool.submit(_read_band, scene.assets["SCL"], grid, Resampling.nearest)] = "SCL"
         for future in as_completed(futures):
-            idx, key = futures[future]
-            try:
-                band_arrays.append((idx, future.result()))
-            except Exception as exc:
-                logger.warning("Failed to read %s band %s: %s", scene.scene_id, key, exc)
+            # A missing band or SCL makes the crop unusable: let the error propagate.
+            arrays[futures[future]] = future.result()
 
-    if not band_arrays:
-        raise ValueError(f"No bands downloaded for scene {scene.scene_id}")
-
-    band_arrays.sort(key=lambda x: x[0])
-    profile["count"] = len(band_arrays)
+    scl = arrays.pop("SCL")
+    cube = assemble_crop(arrays, scl, scene.scales)
 
     with rasterio.open(out_path, "w", **profile) as dst:
-        for i, (_, arr) in enumerate(band_arrays, 1):
-            dst.write(arr, i)
+        dst.write(cube)
+        write_bandspec(dst, BandSpec(names=S2_BAND_NAMES, reflectance_scale=1.0))
 
-    logger.info("Downloaded %s → %s (%d bands)", scene.scene_id, out_path, len(band_arrays))
+    logger.info("Downloaded %s → %s (%d bands)", scene.scene_id, out_path, len(S2_BANDS))
     return out_path
 
 
 def _download_one_scene(
     scene: SceneMetadata,
-    target_bbox: list[float],
+    grid: Grid,
     output_dir: Path,
-    bands: list[str] | None,
     idx: int,
     total: int,
 ) -> Path | None:
     t0 = time.time()
     try:
-        path = download_scene_crop(scene, target_bbox, output_dir, bands=bands)
+        path = download_scene_crop(scene, grid, output_dir)
         sz = path.stat().st_size / 1e6
         logger.info(
             "  [%d/%d] %s  %.1f MB  %.1fs",
@@ -263,45 +319,23 @@ def ingest_aoi(
     date_range: str,
     output_dir: Path,
     max_cloud_cover: float = 20.0,
-    include_s1: bool = False,
     limit: int = 50,
     max_scene_workers: int = 4,
 ) -> list[Path]:
-    """End-to-end ingestion for a single AOI: search + download crops.
-
-    Scene downloads run concurrently (max_scene_workers threads),
-    and each scene's band reads are also threaded internally.
-    """
+    """Search Sentinel-2 L2A over the AOI and warp the scenes onto one AOI grid, concurrently."""
     output_dir = Path(output_dir)
     s2_dir = output_dir / "sentinel2"
-    downloaded: list[Path] = []
-
+    grid = aoi_target_grid(bbox)
     scenes = search_sentinel2(bbox, date_range, max_cloud_cover, limit=limit)
-
+    downloaded: list[Path] = []
     with ThreadPoolExecutor(max_workers=max_scene_workers) as pool:
         futures = {
-            pool.submit(_download_one_scene, scene, bbox, s2_dir, S2_BANDS, i, len(scenes)): scene
+            pool.submit(_download_one_scene, scene, grid, s2_dir, i, len(scenes)): scene
             for i, scene in enumerate(scenes, 1)
         }
         for future in as_completed(futures):
             path = future.result()
             if path is not None:
                 downloaded.append(path)
-
-    if include_s1:
-        s1_dir = output_dir / "sentinel1"
-        s1_scenes = search_sentinel1(bbox, date_range, limit=limit)
-        with ThreadPoolExecutor(max_workers=max_scene_workers) as pool:
-            futures = {
-                pool.submit(
-                    _download_one_scene, scene, bbox, s1_dir, None, i, len(s1_scenes)
-                ): scene
-                for i, scene in enumerate(s1_scenes, 1)
-            }
-            for future in as_completed(futures):
-                path = future.result()
-                if path is not None:
-                    downloaded.append(path)
-
     logger.info("Ingested %d scenes for AOI bbox=%s", len(downloaded), bbox)
     return downloaded

@@ -16,7 +16,8 @@ class Detection(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     geom = Column(Geometry("POLYGON", srid=4326), nullable=False)
-    score = Column(Float, nullable=False)
+    score = Column(Float, nullable=False)  # rank score
+    prob = Column(Float)
     model_version = Column(String, nullable=False)
     evidence = Column(JSONB, default={})
     area_km2 = Column(Float)
@@ -28,7 +29,7 @@ class KnownSite(Base):
     __tablename__ = "known_sites"
 
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, nullable=False)
+    name = Column(String, nullable=False, unique=True)
     country = Column(String)
     geom = Column(Geometry("POINT", srid=4326), nullable=False)
     buffer_geom = Column(Geometry("POLYGON", srid=4326))

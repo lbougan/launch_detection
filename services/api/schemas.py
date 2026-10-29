@@ -6,10 +6,19 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+# Evidence keys that stay on the server: filesystem paths of the API host.
+PRIVATE_EVIDENCE_KEYS = frozenset({"composite_path"})
+
+
+def public_evidence(evidence: dict | None) -> dict:
+    """The evidence dict as sent over the wire, without server-side keys."""
+    return {k: v for k, v in (evidence or {}).items() if k not in PRIVATE_EVIDENCE_KEYS}
+
 
 class DetectionOut(BaseModel):
     id: int
-    score: float
+    score: float  # rank score
+    prob: float | None = None  # mean model probability
     model_version: str
     area_km2: float | None = None
     compactness: float | None = None

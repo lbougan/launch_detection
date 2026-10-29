@@ -7,34 +7,13 @@ import logging
 import os
 from pathlib import Path
 
-import numpy as np
-import pytorch_lightning as pl
-import rasterio
-import torch
 from prefect import task
-from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
-from pytorch_lightning.loggers import MLFlowLogger
-from sqlalchemy import create_engine, text
-from torch.utils.data import DataLoader
 
 from libs.config import settings
-from libs.features.indices import build_temporal_composite, normalize_percentile
-from libs.geo.postprocess import (
-    deduplicate_detections,
-    detections_to_geodataframe,
-    score_detections,
-    threshold_and_extract,
-)
-from libs.geo.tiling import (
-    build_dataset_split,
-    build_weak_label_mask,
-    chip_raster,
-    load_known_sites,
-)
-from libs.stac.client import ingest_aoi
-from services.training.dataset import LaunchSiteDataset
-from services.training.inference import load_model, sliding_window_inference
-from services.training.lightning_module import LaunchSiteSegModule
+
+# Heavy dependencies (rasterio, sqlalchemy, geopandas, the STAC client, torch via the
+# training/inference modules) are imported inside each task, so that importing the flows
+# (e.g. to register a deployment) stays cheap and never pulls in torch.
 
 TRITON_URL = os.environ.get("TRITON_URL", "")
 
@@ -42,90 +21,23 @@ logger = logging.getLogger(__name__)
 
 
 @task(name="train-model")
-def train_model_task(
-    manifest_path: str,
-    known_sites_path: str = "data/manifests/known_sites.json",
-    model_type: str = "unet",
-    encoder: str = "resnet34",
-    in_channels: int = 10,
-    lr: float = 1e-3,
-    epochs: int = 50,
-    batch_size: int = 16,
-    gpus: int = 0,
-    experiment_name: str = "launchsite-seg",
-) -> str:
-    """Train the segmentation model and return the best checkpoint path."""
-    with open(manifest_path) as f:
-        chip_manifest = json.load(f)
+def train_model_task(manifest_path: str, stats_path: str | None = None, **overrides) -> str:
+    """Train via the shared `fit` loop (A13); return the best checkpoint path.
 
-    sites = Path(known_sites_path)
+    `overrides` are `FitConfig` fields (model_type, encoder, lr, epochs, ...).
+    """
+    from libs.config import default_stats_path
+    from services.training.fit import FitConfig, fit
 
-    train_ds = LaunchSiteDataset(chip_manifest, sites, split="train", augment=True)
-    val_ds = LaunchSiteDataset(chip_manifest, sites, split="val", augment=False)
-
-    def _collate(batch: list[dict]) -> dict:
-        return {
-            "image": torch.stack([b["image"] for b in batch]),
-            "mask": torch.stack([b["mask"] for b in batch]),
-            "meta": [b["meta"] for b in batch],
-        }
-
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True,
-        collate_fn=_collate,
+    overrides.setdefault("mlflow_tracking_uri", settings.mlflow_tracking_uri)
+    if overrides.get("gpus", 0) > 0:
+        overrides.setdefault("precision", "16-mixed")
+    cfg = FitConfig(
+        manifest_path=manifest_path,
+        stats_path=stats_path or str(default_stats_path()),
+        **overrides,
     )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True,
-        collate_fn=_collate,
-    )
-
-    module = LaunchSiteSegModule(
-        model_type=model_type,
-        encoder_name=encoder,
-        in_channels=in_channels,
-        lr=lr,
-    )
-
-    mlflow_logger = MLFlowLogger(
-        experiment_name=experiment_name,
-        tracking_uri=settings.mlflow_tracking_uri,
-    )
-
-    callbacks = [
-        ModelCheckpoint(
-            monitor="val/loss",
-            mode="min",
-            save_top_k=3,
-            filename="launchsite-{epoch:02d}-{val/loss:.4f}",
-        ),
-        EarlyStopping(monitor="val/loss", patience=10, mode="min"),
-    ]
-
-    accelerator = "gpu" if gpus > 0 else "cpu"
-    trainer = pl.Trainer(
-        max_epochs=epochs,
-        accelerator=accelerator,
-        devices=gpus if gpus > 0 else "auto",
-        logger=mlflow_logger,
-        callbacks=callbacks,
-        log_every_n_steps=10,
-        precision="16-mixed" if gpus > 0 else 32,
-    )
-
-    logger.info("Starting training: model=%s, encoder=%s, epochs=%d", model_type, encoder, epochs)
-    trainer.fit(module, train_loader, val_loader)
-
-    best = trainer.checkpoint_callback.best_model_path
-    logger.info("Training complete. Best checkpoint: %s", best)
-    return best
+    return fit(cfg)
 
 
 @task(name="ingest-aoi", retries=2, retry_delay_seconds=60)
@@ -135,15 +47,17 @@ def ingest_aoi_task(
     date_range: str,
     output_dir: str,
     max_cloud_cover: float = 20.0,
-    include_s1: bool = False,
+    limit: int = 50,
 ) -> list[str]:
-    """Ingest satellite imagery for a single AOI."""
+    """Ingest satellite imagery for a single AOI (at most ``limit`` scenes)."""
+    from libs.stac.client import ingest_aoi
+
     paths = ingest_aoi(
         bbox=bbox,
         date_range=date_range,
         output_dir=Path(output_dir),
         max_cloud_cover=max_cloud_cover,
-        include_s1=include_s1,
+        limit=limit,
     )
     return [str(p) for p in paths]
 
@@ -155,21 +69,37 @@ def build_composite_task(
     method: str = "median",
 ) -> str:
     """Build a temporal composite from multiple scenes."""
+    import rasterio
+
+    from libs.features.indices import build_temporal_composite
+    from libs.geo.bandspec import write_bandspec
+
     paths = [Path(p) for p in scene_paths]
     if not paths:
         raise ValueError("No scenes to composite")
 
-    composite, profile = build_temporal_composite(paths, method)
-    composite = normalize_percentile(composite)
+    composite, profile, spec = build_temporal_composite(paths, method)
 
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    profile.update(dtype="float32", compress="deflate")
+    profile.update(dtype="float32", nodata=float("nan"), compress="deflate")
     with rasterio.open(out, "w", **profile) as dst:
         dst.write(composite)
+        write_bandspec(dst, spec)
 
     logger.info("Built composite → %s", out)
     return str(out)
+
+
+@task(name="compute-stats")
+def compute_stats_task(composite_paths: list[str], output_path: str) -> str:
+    """Compute global per-channel normalisation stats over the given composites."""
+    from libs.features.stats import compute_channel_stats, save_stats
+
+    stats = compute_channel_stats([Path(p) for p in composite_paths])
+    save_stats(stats, Path(output_path))
+    logger.info("Wrote channel stats (%d samples) -> %s", stats["n_samples"], output_path)
+    return output_path
 
 
 @task(name="tile-composite")
@@ -180,6 +110,8 @@ def tile_composite_task(
     overlap: int = 32,
 ) -> list[dict]:
     """Chip a composite raster into ML-ready tiles."""
+    from libs.geo.chips import chip_raster
+
     chips = chip_raster(
         raster_path=Path(composite_path),
         output_dir=Path(output_dir),
@@ -189,89 +121,101 @@ def tile_composite_task(
     return chips
 
 
+@task(name="assign-splits")
+def assign_splits_task(
+    chip_manifest: list[dict],
+    known_sites_path: str,
+    splits_path: str,
+    aois: list[dict] | None = None,
+) -> list[dict]:
+    """Assign site-held-out train/val/test splits to chips (all chips of a held-out AOI too)."""
+    from libs.geo.chips import load_known_sites
+    from libs.geo.splits import assign_splits
+
+    sites = load_known_sites(Path(known_sites_path))
+    splits = json.loads(Path(splits_path).read_text())
+    return assign_splits(
+        chip_manifest, sites, splits, exclusion_km=float(splits["exclusion_km"]), aois=aois
+    )
+
+
 @task(name="build-labels")
 def build_labels_task(
     chip_manifest: list[dict],
     known_sites_path: str,
 ) -> list[dict]:
-    """Generate weak label masks and dataset splits."""
+    """Generate weak label masks for chips (splits are assigned upstream)."""
+    import rasterio
+
+    from libs.geo.chips import load_known_sites
+    from libs.geo.labels import build_label_mask, write_label
+
     sites = load_known_sites(Path(known_sites_path))
-    enriched = build_dataset_split(chip_manifest, sites)
+    enriched = [dict(chip) for chip in chip_manifest]
 
     for chip in enriched:
-        mask = build_weak_label_mask(
-            bbox=chip["bbox"],
-            tile_size=256,
-            known_sites=sites,
-        )
-        label_path = Path(chip["path"]).parent / f"{chip['tile_id']}_label.npy"
-        np.save(label_path, mask)
-        chip["label_path"] = str(label_path)
+        with rasterio.open(chip["path"]) as src:
+            mask = build_label_mask(src, sites)
+            label_path = Path(chip["path"]).parent / f"{chip['tile_id']}_label.tif"
+            chip["label_path"] = str(write_label(label_path, mask, src))
 
     return enriched
 
 
 @task(name="run-inference")
 def run_inference_task(
-    checkpoint_path: str,
     raster_path: str,
     output_path: str,
-    tile_size: int = 256,
-    overlap: int = 64,
-    device: str = "cpu",
-) -> str:
-    """Run sliding-window inference over a raster."""
-    model = load_model(checkpoint_path, device)
-    result = sliding_window_inference(
-        model=model,
-        raster_path=Path(raster_path),
-        output_path=Path(output_path),
-        tile_size=tile_size,
-        overlap=overlap,
-        device=device,
-    )
-    return str(result)
-
-
-@task(name="run-triton-inference")
-def run_triton_inference_task(
-    raster_path: str,
-    output_path: str,
+    stats_path: str,  # "" -> the local checkpoint's embedded stats
+    serving_mode: str,
+    checkpoint_path: str = "",
     triton_url: str = "",
-    tile_size: int = 256,
+    memmap: bool = False,
+    tile: int = 256,
     overlap: int = 64,
     batch_size: int = 16,
-    use_memopt: bool = False,
-    max_memory_mb: float = 512.0,
+    device: str = "cpu",
 ) -> str:
-    """Run sliding-window inference via Triton Inference Server."""
-    from services.serving.triton_client import triton_sliding_window_inference
+    """Run sliding-window inference over a raster with a local or Triton predictor.
 
-    url = triton_url or TRITON_URL
-    if not url:
-        raise ValueError("Triton URL not set: pass triton_url or set TRITON_URL env var")
+    A local checkpoint's embedded stats are used; a `stats_path` given as well must match them.
+    Triton models need `stats_path`.
+    """
+    from libs.features.stats import resolve_stats
+    from libs.inference.sliding_window import run_sliding_window
 
-    if use_memopt:
-        from services.serving.memory_optimized import memory_optimized_inference
+    if serving_mode == "triton":
+        from libs.inference.predictors import TritonPredictor
 
-        result = memory_optimized_inference(
-            raster_path=Path(raster_path),
-            output_path=Path(output_path),
-            triton_url=url,
-            tile_size=tile_size,
-            overlap=overlap,
-            batch_size=batch_size,
-            max_memory_mb=max_memory_mb,
-        )
+        url = triton_url or TRITON_URL
+        if not url:
+            raise ValueError("Triton URL not set: pass triton_url or set TRITON_URL env var")
+        predictor = TritonPredictor.connect(url)
+    elif serving_mode == "local":
+        from libs.inference.predictors import LocalTorchPredictor
+
+        if not checkpoint_path:
+            raise ValueError("checkpoint_path is required for serving_mode='local'")
+        predictor = LocalTorchPredictor.from_checkpoint(checkpoint_path, device=device)
     else:
-        result = triton_sliding_window_inference(
+        raise ValueError(f"Unknown serving_mode: {serving_mode!r}")
+
+    try:
+        stats = resolve_stats(getattr(predictor, "stats", None), stats_path or None)
+        result = run_sliding_window(
             raster_path=Path(raster_path),
             output_path=Path(output_path),
-            triton_url=url,
-            tile_size=tile_size,
+            predictor=predictor,
+            stats=stats,
+            tile=tile,
             overlap=overlap,
             batch_size=batch_size,
+            memmap=memmap,
         )
+    finally:
+        close = getattr(predictor, "close", None)
+        if callable(close):
+            close()
     return str(result)
 
 
@@ -281,12 +225,19 @@ def postprocess_task(
     threshold: float = 0.5,
     min_area_px: int = 50,
     dedupe_method: str = "dbscan",
-    dedupe_eps: float = 0.02,
+    dedupe_eps_m: float = 2000.0,
 ) -> list[dict]:
     """Extract, score, and deduplicate detections from probability raster."""
+    from libs.geo.postprocess import (
+        deduplicate_detections,
+        detections_to_geodataframe,
+        score_detections,
+        threshold_and_extract,
+    )
+
     detections = threshold_and_extract(prob_raster_path, threshold, min_area_px)
     detections = score_detections(detections)
-    detections = deduplicate_detections(detections, method=dedupe_method, eps_deg=dedupe_eps)
+    detections = deduplicate_detections(detections, method=dedupe_method, eps_m=dedupe_eps_m)
 
     gdf = detections_to_geodataframe(detections)
     return (
@@ -296,41 +247,98 @@ def postprocess_task(
     )
 
 
+def _bbox_4326(geometry: dict) -> list[float]:
+    """[min_lon, min_lat, max_lon, max_lat] of a GeoJSON geometry in EPSG:4326."""
+    from shapely.geometry import shape
+
+    return [float(v) for v in shape(geometry).bounds]
+
+
 @task(name="store-detections")
 def store_detections_task(
     geojson: dict,
     model_version: str,
+    composite_path: str,
+    scan_date: str,
     db_url: str | None = None,
 ) -> int:
-    """Store detections in PostGIS."""
-    url = db_url or settings.database_url
-    engine = create_engine(url)
+    """Store detections in PostGIS.
 
+    `score` holds the rank score (what the map filters on), `prob` the mean model
+    probability. `evidence` carries what the thumbnail endpoint needs to render:
+    the composite path and the detection's EPSG:4326 envelope.
+    """
+    from sqlalchemy import create_engine, text
+
+    engine = create_engine(db_url or settings.database_url)
     features = geojson.get("features", [])
-    stored = 0
 
     with engine.begin() as conn:
         for feat in features:
             props = feat.get("properties", {})
-            geom_json = json.dumps(feat["geometry"])
+            prob = props.get("prob")
+            evidence = {
+                "prob": prob,
+                "rank_breakdown": props.get("rank_breakdown", {}),
+                "composite_path": composite_path,
+                "bbox": _bbox_4326(feat["geometry"]),
+                "model_version": model_version,
+                "scan_date": scan_date,
+            }
             conn.execute(
                 text("""
-                    INSERT INTO detections (geom, score, model_version, area_km2, compactness, evidence)
+                    INSERT INTO detections
+                        (geom, score, prob, model_version, area_km2, compactness, evidence)
                     VALUES (
                         ST_SetSRID(ST_GeomFromGeoJSON(:geom), 4326),
-                        :score, :model_version, :area_km2, :compactness, :evidence::jsonb
+                        :score, :prob, :model_version, :area_km2, :compactness,
+                        CAST(:evidence AS jsonb)
                     )
                 """),
                 {
-                    "geom": geom_json,
-                    "score": props.get("score", 0),
+                    "geom": json.dumps(feat["geometry"]),
+                    "score": props.get("rank_score", 0.0),
+                    "prob": prob,
                     "model_version": model_version,
                     "area_km2": props.get("area_km2"),
                     "compactness": props.get("compactness"),
-                    "evidence": json.dumps(props),
+                    "evidence": json.dumps(evidence),
                 },
             )
-            stored += 1
 
-    logger.info("Stored %d detections (model_version=%s)", stored, model_version)
-    return stored
+    logger.info("Stored %d detections (model_version=%s)", len(features), model_version)
+    return len(features)
+
+
+@task(name="seed-known-sites")
+def seed_known_sites_task(known_sites_path: str, db_url: str | None = None) -> int:
+    """Insert the known-sites manifest into PostGIS; existing names are left alone.
+
+    Returns the number of newly inserted sites.
+    """
+    from sqlalchemy import create_engine, text
+
+    from libs.geo.chips import load_known_sites
+
+    sites = load_known_sites(Path(known_sites_path))
+    engine = create_engine(db_url or settings.database_url)
+    inserted = 0
+    with engine.begin() as conn:
+        for site in sites:
+            result = conn.execute(
+                text("""
+                    INSERT INTO known_sites (name, country, geom, source)
+                    VALUES (:name, :country, ST_SetSRID(ST_MakePoint(:lon, :lat), 4326), :source)
+                    ON CONFLICT (name) DO NOTHING
+                """),
+                {
+                    "name": site["name"],
+                    "country": site.get("country"),
+                    "lon": float(site["lon"]),
+                    "lat": float(site["lat"]),
+                    "source": Path(known_sites_path).name,
+                },
+            )
+            inserted += result.rowcount
+    logger.info("Seeded %d new known sites from %s", inserted, known_sites_path)
+    return inserted
