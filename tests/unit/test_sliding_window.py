@@ -4,7 +4,7 @@ import rasterio
 
 from libs.inference.predictors import FakePredictor
 from libs.inference.sliding_window import Accumulator, iter_windows, run_sliding_window
-from tests.fixtures.synthetic import make_reflectance_cube, write_composite
+from libs.synthetic import make_reflectance_cube, write_composite
 
 
 @pytest.mark.parametrize("h,w", [(256, 256), (300, 300), (1000, 700)])

@@ -2,7 +2,7 @@ import rasterio
 
 from libs.geo.bandspec import read_bandspec
 from libs.geo.chips import chip_raster
-from tests.fixtures.synthetic import site_lonlat
+from libs.synthetic import site_lonlat
 
 
 def test_chips_cover_the_raster_and_carry_bandspec(small_composite, tmp_path):

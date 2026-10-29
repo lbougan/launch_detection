@@ -173,13 +173,20 @@ def train_flow(
     return best_ckpt
 
 
+def detect_stats_path(serving_mode: str, stats_path: str) -> str:
+    """Triton needs the stats file; a local checkpoint carries its own (empty = use those)."""
+    if serving_mode == "triton" and not stats_path:
+        return str(default_stats_path())
+    return stats_path
+
+
 @flow(name="scan-and-detect", log_prints=True)
 def scan_and_detect_flow(
     aoi_config_path: str = "data/manifests/aoi_config.json",
     checkpoint_path: str = "checkpoints/best.ckpt",
     model_version: str = "v0.1",
     threshold: float = 0.5,
-    stats_path: str = str(default_stats_path()),
+    stats_path: str = "",
     device: str = "cpu",
     serving_mode: str = "",
     triton_url: str = "",
@@ -192,7 +199,9 @@ def scan_and_detect_flow(
             Triton Inference Server. Defaults to ``"triton"`` when the
             ``TRITON_URL`` env var is set, otherwise ``"local"``.
         device: Torch device for ``serving_mode='local'``.
-        stats_path: Channel stats written at training time (must match the checkpoint).
+        stats_path: Channel stats file. A local checkpoint carries its own stats, so the
+            default (empty) uses those and a file given is checked against them; Triton
+            serving needs the file and defaults to the project's ``channel_stats.json``.
         triton_url: Triton gRPC endpoint (overrides ``TRITON_URL`` env var).
         known_sites_path: Manifest seeded into ``known_sites`` first, so the map
             always has the reference layer.
@@ -207,6 +216,7 @@ def scan_and_detect_flow(
 
     if not serving_mode:
         serving_mode = "triton" if os.environ.get("TRITON_URL") else "local"
+    stats_path = detect_stats_path(serving_mode, stats_path)
 
     with open(aoi_config_path) as f:
         aoi_config = json.load(f)
@@ -340,7 +350,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Inference backend: 'local' (in-process PyTorch) or 'triton' (Triton server). "
         "Default: auto-detect via TRITON_URL env var.",
     )
-    p_detect.add_argument("--stats", default=str(default_stats_path()))
+    p_detect.add_argument(
+        "--stats",
+        default="",
+        help="stats JSON; default: the local checkpoint's own (Triton: channel_stats.json)",
+    )
     p_detect.add_argument("--device", default="cpu", help="Torch device for local serving")
     p_detect.add_argument("--triton-url", default="", help="Triton gRPC endpoint")
     return parser

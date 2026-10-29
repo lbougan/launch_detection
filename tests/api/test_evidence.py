@@ -15,6 +15,14 @@ def _png_array(content: bytes) -> np.ndarray:
     return np.asarray(Image.open(io.BytesIO(content)).convert("RGB"))
 
 
+def test_evidence_metadata_hides_the_server_side_composite_path(client, seeded):
+    top = client.get("/detections").json()["detections"][0]  # the one with real evidence
+    body = client.get(f"/evidence/{top['id']}").json()
+    assert "composite_path" not in body["evidence"]
+    assert body["evidence"]["model_version"] == "test", "the rest of the evidence is kept"
+    assert body["geometry"]["type"] == "Polygon"
+
+
 def test_thumbnail_renders_png_for_both_modes(client, seeded):
     ids = [d["id"] for d in client.get("/detections").json()["detections"]]
     with_evidence = ids[0]  # highest score first = the planted one

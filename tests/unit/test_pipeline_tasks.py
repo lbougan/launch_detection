@@ -11,8 +11,8 @@ import rasterio
 from rasterio.transform import from_origin
 
 from libs.inference.predictors import FakePredictor
+from libs.synthetic import CRS_UTM33, make_synthetic_composite, site_lonlat
 from services.pipeline import tasks
-from tests.fixtures.synthetic import CRS_UTM33, make_synthetic_composite, site_lonlat
 
 
 class ClosablePredictor(FakePredictor):

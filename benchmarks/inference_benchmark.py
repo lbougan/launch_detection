@@ -74,8 +74,8 @@ class BenchmarkResult:
 
 
 def create_synthetic_raster(size: int, tmpdir: str) -> Path:
-    """Synthetic 6-band composite (planted site, BANDSPEC tag) written via the test fixtures."""
-    from tests.fixtures.synthetic import make_reflectance_cube, write_composite
+    """Synthetic 6-band composite (planted site, BANDSPEC tag) from `libs.synthetic`."""
+    from libs.synthetic import make_reflectance_cube, write_composite
 
     cube = make_reflectance_cube(size, size, size // 2, size // 2, max(8, size // 25))
     return write_composite(Path(tmpdir) / f"synthetic_{size}x{size}.tif", cube)

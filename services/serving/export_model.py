@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -20,7 +20,7 @@ DEFAULT_TILE_SIZE = 256
 def export_to_onnx(
     checkpoint_path: str | Path,
     output_path: str | Path,
-    stats_path: str | Path,
+    stats_path: str | Path | None = None,
     in_channels: int = DEFAULT_IN_CHANNELS,
     tile_size: int = DEFAULT_TILE_SIZE,
     opset_version: int = 17,
@@ -31,7 +31,10 @@ def export_to_onnx(
     Args:
         checkpoint_path: Path to the Lightning ``.ckpt`` file.
         output_path: Where to write ``model.onnx``.
-        stats_path: Normalisation ``stats.json``; embedded as metadata and copied next to the model.
+        stats_path: Normalisation stats file. The checkpoint's own stats are what gets embedded
+            as metadata and written next to the model; a file given here must match them.
+            Checkpoints from before stats were embedded need the file (default: the
+            project's ``channel_stats.json``).
         in_channels: Number of input channels the model expects.
         tile_size: Spatial dimension (H=W) of input tiles.
         opset_version: ONNX opset version.
@@ -40,6 +43,8 @@ def export_to_onnx(
     Returns:
         Resolved path to the written ONNX file.
     """
+    from libs.config import default_stats_path
+    from libs.features.stats import resolve_stats, save_stats
     from services.training.lightning_module import LaunchSiteSegModule
 
     checkpoint_path = Path(checkpoint_path)
@@ -49,6 +54,10 @@ def export_to_onnx(
     # Rebuild from hparams + state_dict rather than load_from_checkpoint, which requires
     # Lightning's version bookkeeping keys that plain ``torch.save`` checkpoints lack.
     ckpt = torch.load(str(checkpoint_path), map_location="cpu", weights_only=False)
+    embedded = ckpt["hyper_parameters"].get("stats")
+    if embedded is None and stats_path is None:
+        stats_path = default_stats_path()  # checkpoints from before stats were embedded
+    stats = resolve_stats(embedded, stats_path)
     module = LaunchSiteSegModule(**ckpt["hyper_parameters"])
     module.load_state_dict(ckpt["state_dict"])
     module.eval()
@@ -72,10 +81,8 @@ def export_to_onnx(
     )
     logger.info("Exported ONNX model → %s", output_path)
 
-    _embed_metadata(output_path, Path(stats_path), in_channels, tile_size)
-    stats_dest = output_path.parent / "stats.json"
-    if Path(stats_path).resolve() != stats_dest.resolve():
-        shutil.copyfile(stats_path, stats_dest)
+    _embed_metadata(output_path, stats, in_channels, tile_size)
+    save_stats(stats, output_path.parent / "stats.json")
 
     if validate:
         _validate_onnx(model, output_path, dummy_input)
@@ -96,7 +103,7 @@ def _git_commit() -> str:
         return "unknown"
 
 
-def _embed_metadata(onnx_path: Path, stats_path: Path, in_channels: int, tile_size: int) -> None:
+def _embed_metadata(onnx_path: Path, stats: dict, in_channels: int, tile_size: int) -> None:
     """Append stats, band spec and provenance to the ONNX ``metadata_props``."""
     import onnx
 
@@ -104,7 +111,7 @@ def _embed_metadata(onnx_path: Path, stats_path: Path, in_channels: int, tile_si
     from libs.geo.bandspec import S2_BAND_NAMES, BandSpec
 
     entries = {
-        "stats_json": Path(stats_path).read_text(),
+        "stats_json": json.dumps(stats),
         "bandspec_json": BandSpec(names=S2_BAND_NAMES, indices=INDEX_NAMES).to_json(),
         "in_channels": str(in_channels),
         "tile_size": str(tile_size),
@@ -146,8 +153,6 @@ def _validate_onnx(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    from libs.config import default_stats_path
-
     parser = argparse.ArgumentParser(description="Export LaunchSiteSegModule checkpoint to ONNX")
     parser.add_argument("--checkpoint", required=True, help="Path to .ckpt Lightning checkpoint")
     parser.add_argument(
@@ -156,7 +161,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output ONNX path",
     )
     parser.add_argument(
-        "--stats", default=str(default_stats_path()), help="Path to channel_stats.json"
+        "--stats",
+        default=None,
+        help="stats JSON; default: the checkpoint's own (checked against this file if given)",
     )
     parser.add_argument("--in-channels", type=int, default=DEFAULT_IN_CHANNELS)
     parser.add_argument("--tile-size", type=int, default=DEFAULT_TILE_SIZE)

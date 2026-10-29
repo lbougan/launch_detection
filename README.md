@@ -149,8 +149,7 @@ PyTorch, embeds the normalisation stats and band spec in the ONNX metadata and c
 file next to the model:
 
 ```bash
-uv run python -m services.serving.export_model --checkpoint checkpoints/<best>.ckpt \
-  --stats data/manifests/channel_stats.json
+uv run python -m services.serving.export_model --checkpoint checkpoints/<best>.ckpt
 docker compose -f infra/docker-compose.yml up -d triton   # needs nvidia-container-toolkit
 TRITON_URL=localhost:8001 uv run python -m services.pipeline.flows detect --serving-mode triton
 ```
@@ -207,12 +206,21 @@ docker compose -f infra/docker-compose.yml up -d postgres
 uv run pytest -m api -q       # API tests on PostGIS, in their own <db>_test database
 ```
 
-136 tests run by default and 10 API tests run with `-m api`. Coverage is gated at 80 % (93.9 %
+The schema in `infra/postgres-init/001_schema.sql` runs on the database's first boot only. A
+database created before v0.2 lacks the `prob` column and the unique site name the v0.2 pipeline
+writes against; the script is idempotent, so re-apply it to upgrade in place:
+
+```bash
+docker compose -f infra/docker-compose.yml exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U launchsite -d launchsite < infra/postgres-init/001_schema.sql
+```
+
+142 tests run by default and 11 API tests run with `-m api`. Coverage is gated at 80 % (94.1 %
 measured) over `libs` and `services`, except for files omitted from that gate in
 `pyproject.toml`: `services/web/*` (JavaScript), `services/pipeline/flows.py` (Prefect wiring),
 `services/serving/export_model.py` (ONNX export), `libs/stac/client.py` (network I/O; its pure
 helpers are unit-tested) and `services/api/*` (needs PostGIS). The API is gated at 80 % by the API
-job instead (89.6 % measured, [`.coveragerc.api`](.coveragerc.api)). CI
+job instead (90.8 % measured, [`.coveragerc.api`](.coveragerc.api)). CI
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) has two jobs: `lint-and-unit` (ruff,
 pytest with the coverage gate) and `api` (pytest `-m api` against a PostGIS service container,
 with its own coverage gate).

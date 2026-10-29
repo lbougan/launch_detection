@@ -5,8 +5,8 @@ import torch
 from libs.features.stats import compute_channel_stats, save_stats
 from libs.geo.chips import chip_raster
 from libs.geo.labels import build_label_mask, write_label
+from libs.synthetic import site_lonlat
 from services.training.dataset import LaunchSiteDataset
-from tests.fixtures.synthetic import site_lonlat
 
 
 def test_dataset_returns_normalised_image_mask_and_weight(small_composite, tmp_path):

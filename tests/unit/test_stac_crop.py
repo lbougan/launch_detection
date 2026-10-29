@@ -9,7 +9,7 @@ from libs.stac.client import (
     is_pipeline_crop,
     scale_offset_for,
 )
-from tests.fixtures.synthetic import write_composite
+from libs.synthetic import write_composite
 
 
 def _arrays(dn: int) -> dict[str, np.ndarray]:
@@ -120,40 +120,48 @@ def _write_band(path, data, crs, transform, nodata=None):
     return str(path)
 
 
-def test_download_scene_crop_lands_every_scene_on_the_aoi_grid(tmp_path):
-    """Two 'scenes' in different UTM zones, read as local files, end up on one identical grid."""
+AOI_BBOX = [17.95, 40.0, 18.05, 40.05]  # straddles the 33N / 34N boundary at 18 E
+
+
+def _local_scene(tmp_path, i: int, epsg: int):
+    """A 'scene' in UTM zone `epsg` as local band files covering the western 60 % of the AOI."""
     from rasterio.transform import from_origin
 
-    from libs.stac.client import SceneMetadata, aoi_target_grid, download_scene_crop
+    from libs.stac.client import SceneMetadata
 
-    bbox = [17.95, 40.0, 18.05, 40.05]  # straddles the 33N / 34N boundary at 18 E
-    grid = aoi_target_grid(bbox)
-    out = []
-    for i, epsg in enumerate((32633, 32634)):
-        tr = rasterio.warp.transform("EPSG:4326", f"EPSG:{epsg}", [bbox[0]], [bbox[3]])
-        x0, y0 = tr[0][0] - 2_000, tr[1][0] + 2_000
-        # the scene covers only the western 60 % of the AOI width (about 5 km of 8.5 km)
-        transform = from_origin(x0, y0, 10.0, 10.0)
-        h, w = 1000, 700
-        assets = {
-            b: _write_band(
-                tmp_path / f"{i}_{b}.tif",
-                np.full((h, w), 2000, dtype=np.uint16),
-                f"EPSG:{epsg}",
-                transform,
-                nodata=0,
-            )
-            for b in S2_BANDS
-        }
-        assets["SCL"] = _write_band(
-            tmp_path / f"{i}_SCL.tif",
-            np.full((h // 2, w // 2), 4, dtype=np.uint8),
+    tr = rasterio.warp.transform("EPSG:4326", f"EPSG:{epsg}", [AOI_BBOX[0]], [AOI_BBOX[3]])
+    x0, y0 = tr[0][0] - 2_000, tr[1][0] + 2_000
+    transform = from_origin(x0, y0, 10.0, 10.0)
+    h, w = 1000, 700
+    assets = {
+        b: _write_band(
+            tmp_path / f"{i}_{b}.tif",
+            np.full((h, w), 2000, dtype=np.uint16),
             f"EPSG:{epsg}",
-            from_origin(x0, y0, 20.0, 20.0),
+            transform,
             nodata=0,
         )
-        scene = SceneMetadata(f"s{i}", "sentinel-2", "", bbox, 0.0, assets)
-        out.append(download_scene_crop(scene, grid, tmp_path / "crops"))
+        for b in S2_BANDS
+    }
+    assets["SCL"] = _write_band(
+        tmp_path / f"{i}_SCL.tif",
+        np.full((h // 2, w // 2), 4, dtype=np.uint8),
+        f"EPSG:{epsg}",
+        from_origin(x0, y0, 20.0, 20.0),
+        nodata=0,
+    )
+    return SceneMetadata(f"s{i}", "sentinel-2", "", AOI_BBOX, 0.0, assets)
+
+
+def test_download_scene_crop_lands_every_scene_on_the_aoi_grid(tmp_path):
+    """Two 'scenes' in different UTM zones, read as local files, end up on one identical grid."""
+    from libs.stac.client import aoi_target_grid, download_scene_crop
+
+    grid = aoi_target_grid(AOI_BBOX)
+    out = [
+        download_scene_crop(_local_scene(tmp_path, i, epsg), grid, tmp_path / "crops")
+        for i, epsg in enumerate((32633, 32634))
+    ]
     for p in out:
         with rasterio.open(p) as src:
             assert src.crs == grid.crs and src.transform == grid.transform
@@ -161,3 +169,20 @@ def test_download_scene_crop_lands_every_scene_on_the_aoi_grid(tmp_path):
             cube = src.read()
         assert np.allclose(cube[:, 10, 10], 0.2), "inside the scene: reflectance"
         assert np.isnan(cube[:, 10, -10]).all(), "outside the scene: NaN"
+
+
+def test_truncated_crop_from_an_interrupted_run_is_redownloaded(tmp_path):
+    """A file rasterio cannot open must not be skipped forever; it is replaced."""
+    from libs.stac.client import aoi_target_grid, download_scene_crop, reusable_crop
+
+    grid = aoi_target_grid(AOI_BBOX)
+    crops = tmp_path / "crops"
+    crops.mkdir()
+    junk = crops / "s0.tif"
+    junk.write_bytes(b"II*\x00garbage")
+    assert reusable_crop(junk, grid) is False
+
+    path = download_scene_crop(_local_scene(tmp_path, 0, 32633), grid, crops)
+    assert path == junk and reusable_crop(path, grid) is True
+    with rasterio.open(path) as src:
+        assert src.transform == grid.transform

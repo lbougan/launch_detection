@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 
 from libs.config import settings
-from tests.fixtures.synthetic import make_synthetic_composite, site_lonlat
+from libs.synthetic import make_synthetic_composite, site_lonlat
 
 pytestmark = pytest.mark.api
 

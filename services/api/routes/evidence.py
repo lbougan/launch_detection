@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from libs.geo.bandspec import read_bandspec
 from services.api.database import get_db
 from services.api.models import Detection
+from services.api.schemas import public_evidence
 
 router = APIRouter()
 
@@ -70,7 +71,7 @@ def get_evidence(
         "detection_id": detection_id,
         "score": row.score,
         "model_version": row.model_version,
-        "evidence": row.evidence or {},
+        "evidence": public_evidence(row.evidence),
         "geometry": json.loads(row.geom_geojson),
     }
 

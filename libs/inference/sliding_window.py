@@ -65,9 +65,8 @@ class Accumulator:
             self._tmp = tempfile.TemporaryDirectory(dir=tmpdir, prefix="slidingwindow_")
             base = Path(self._tmp.name)
             self.prob = np.memmap(base / "prob.dat", dtype=np.float32, mode="w+", shape=shape)
+            # mode="w+" creates a zero-filled sparse file: no eager write of 2 x H x W x 4 bytes.
             self.count = np.memmap(base / "count.dat", dtype=np.float32, mode="w+", shape=shape)
-            self.prob[:] = 0.0
-            self.count[:] = 0.0
         else:
             self.prob = np.zeros(shape, dtype=np.float32)
             self.count = np.zeros(shape, dtype=np.float32)

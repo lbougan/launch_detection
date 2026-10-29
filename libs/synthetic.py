@@ -1,4 +1,5 @@
-"""Synthetic Sentinel-2-like data for tests: small composites with one planted 'site'.
+"""Synthetic Sentinel-2-like data for the tests and the inference benchmark: small composites
+with one planted 'site'.
 
 Everything is in EPSG:32633 (UTM 33N) at 10 m so that metres are metres, with a known
 geotransform, so that tests can compute where the planted site must appear.

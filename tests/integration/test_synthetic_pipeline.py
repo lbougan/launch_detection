@@ -20,9 +20,9 @@ from libs.geo.chips import chip_raster
 from libs.geo.labels import build_label_mask, write_label
 from libs.geo.splits import assign_splits
 from libs.inference.predictors import LocalTorchPredictor
+from libs.synthetic import make_synthetic_composite, site_lonlat
 from services.training.evaluate import evaluate_composites
 from services.training.fit import FitConfig, fit
-from tests.fixtures.synthetic import make_synthetic_composite, site_lonlat
 
 pytestmark = pytest.mark.integration
 

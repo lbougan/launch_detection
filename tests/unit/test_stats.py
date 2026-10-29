@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from libs.features.stats import compute_channel_stats, load_stats, save_stats
-from tests.fixtures.synthetic import BAND_NAMES, make_reflectance_cube, write_composite
+from libs.synthetic import BAND_NAMES, make_reflectance_cube, write_composite
 
 
 def test_stats_over_training_composites(tmp_path):

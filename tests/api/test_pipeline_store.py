@@ -70,8 +70,8 @@ def test_real_postprocess_output_is_stored_at_the_planted_site(clean_db, tmp_pat
     import rasterio
     from rasterio.transform import from_origin
 
+    from libs.synthetic import CRS_UTM33, GSD_M, PlantedSite, site_lonlat
     from services.pipeline.tasks import postprocess_task
-    from tests.fixtures.synthetic import CRS_UTM33, GSD_M, PlantedSite, site_lonlat
 
     prob = np.zeros((200, 200), dtype=np.float32)
     prob[110:134, 60:84] = 0.9

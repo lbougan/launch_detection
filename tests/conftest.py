@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.fixtures.synthetic import PlantedSite, make_synthetic_composite
+from libs.synthetic import PlantedSite, make_synthetic_composite
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

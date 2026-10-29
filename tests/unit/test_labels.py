@@ -10,7 +10,7 @@ from libs.geo.labels import (
     weight_from_label,
     write_label,
 )
-from tests.fixtures.synthetic import site_lonlat
+from libs.synthetic import site_lonlat
 
 
 def test_label_values_are_positive_ignore_ring_negative(small_composite):
@@ -80,3 +80,19 @@ def test_three_km_buffer_at_63_north_is_round(tmp_path):
     radius_rows = (rows[-1] - rows[0] + 1) / 2
     radius_cols = (cols[-1] - cols[0] + 1) / 2
     assert abs(radius_rows - 300) <= 2 and abs(radius_cols - 300) <= 2, (radius_rows, radius_cols)
+
+
+def test_site_shapes_are_reprojected_once_per_crs(small_composite):
+    """build_labels_task calls build_label_mask per chip; the circles depend only on (sites, CRS)."""
+    from libs.geo.labels import _site_shapes_cached
+
+    path, site = small_composite
+    lon, lat = site_lonlat(site)
+    sites = [{"lon": lon, "lat": lat, "buffer_km": 0.3}]
+    _site_shapes_cached.cache_clear()
+    with rasterio.open(path) as src:
+        first = build_label_mask(src, sites)
+        second = build_label_mask(src, sites)
+    info = _site_shapes_cached.cache_info()
+    assert info.misses == 2 and info.hits == 2, "ring + core computed once, reused once"
+    assert np.array_equal(first, second)

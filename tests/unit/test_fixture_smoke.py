@@ -2,7 +2,7 @@ import numpy as np
 import rasterio
 
 from libs.geo.bandspec import read_bandspec
-from tests.fixtures.synthetic import BAND_NAMES, site_lonlat
+from libs.synthetic import BAND_NAMES, site_lonlat
 
 
 def test_small_composite_has_bandspec_and_planted_site(small_composite):

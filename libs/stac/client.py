@@ -16,6 +16,7 @@ import pystac_client
 import rasterio
 from rasterio.crs import CRS
 from rasterio.enums import Resampling
+from rasterio.errors import RasterioIOError
 from rasterio.transform import Affine, from_origin
 from rasterio.vrt import WarpedVRT
 from rasterio.warp import transform_bounds
@@ -115,6 +116,16 @@ def is_pipeline_crop(path: Path) -> bool:
     """True if the GeoTIFF carries the BANDSPEC tag (v0.1 crops are untagged, unmasked uint16)."""
     with rasterio.open(path) as src:
         return TAG_KEY in src.tags()
+
+
+def reusable_crop(path: Path, grid: Grid) -> bool:
+    """True if an existing crop is a pipeline crop on `grid`; a file rasterio cannot open
+    (truncated by an interrupted run) is not reusable and gets re-downloaded."""
+    try:
+        return is_pipeline_crop(path) and crop_matches_grid(path, grid)
+    except RasterioIOError as exc:
+        logger.warning("Existing crop %s is unreadable (%s)", path, exc)
+        return False
 
 
 def get_stac_client() -> pystac_client.Client:
@@ -234,11 +245,13 @@ def download_scene_crop(
     out_path = output_dir / f"{scene.scene_id}.tif"
 
     if out_path.exists():
-        if is_pipeline_crop(out_path) and crop_matches_grid(out_path, grid):
+        if reusable_crop(out_path, grid):
             logger.debug("Scene %s already downloaded at %s", scene.scene_id, out_path)
             return out_path
         logger.warning(
-            "Re-downloading %s: %s is legacy or on another grid", scene.scene_id, out_path
+            "Re-downloading %s: %s is legacy, on another grid or unreadable",
+            scene.scene_id,
+            out_path,
         )
 
     missing = [k for k in S2_BANDS if k not in scene.assets]

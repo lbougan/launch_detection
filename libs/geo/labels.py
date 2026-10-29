@@ -7,6 +7,7 @@ irregular footprint, and the ring is where the label is least trustworthy.
 
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -22,14 +23,26 @@ IGNORE_RING_FACTOR = 2.0
 DEFAULT_BUFFER_KM = 2.0
 
 
-def _site_shapes_in_raster_crs(src: rasterio.io.DatasetReader, sites: list[dict], factor: float):
+SiteKey = tuple[float, float, float]  # lon, lat, buffer_km
+
+
+@lru_cache(maxsize=64)
+def _site_shapes_cached(crs_wkt: str, sites_key: tuple[SiteKey, ...], factor: float) -> tuple:
+    """Site circles in the raster CRS. Keyed on the CRS and the sites, so the thousands of
+    chips of one AOI share a single set of reprojected circles."""
     shapes = []
-    for s in sites:
-        radius_m = float(s.get("buffer_km", DEFAULT_BUFFER_KM)) * 1000.0 * factor
-        circle_ll = buffer_m(float(s["lon"]), float(s["lat"]), radius_m)
-        geom = transform_geom("EPSG:4326", src.crs, mapping(circle_ll))
-        shapes.append(shape(geom))
-    return shapes
+    for lon, lat, buffer_km in sites_key:
+        circle_ll = buffer_m(lon, lat, buffer_km * 1000.0 * factor)
+        shapes.append(shape(transform_geom("EPSG:4326", crs_wkt, mapping(circle_ll))))
+    return tuple(shapes)
+
+
+def _site_shapes_in_raster_crs(src: rasterio.io.DatasetReader, sites: list[dict], factor: float):
+    key = tuple(
+        (float(s["lon"]), float(s["lat"]), float(s.get("buffer_km", DEFAULT_BUFFER_KM)))
+        for s in sites
+    )
+    return list(_site_shapes_cached(src.crs.to_wkt(), key, factor))
 
 
 def build_label_mask(src: rasterio.io.DatasetReader, sites: list[dict]) -> np.ndarray:

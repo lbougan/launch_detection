@@ -3,7 +3,7 @@ import pytest
 import rasterio
 
 from libs.geo.bandspec import BandSpec, read_bandspec
-from tests.fixtures.synthetic import make_reflectance_cube, write_composite
+from libs.synthetic import make_reflectance_cube, write_composite
 
 
 def test_roundtrip_through_geotiff_tags(tmp_path):

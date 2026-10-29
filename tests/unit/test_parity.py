@@ -8,8 +8,8 @@ from libs.geo.bandspec import read_bandspec
 from libs.geo.chips import chip_raster
 from libs.geo.labels import build_label_mask, write_label
 from libs.inference.sliding_window import read_tile
+from libs.synthetic import make_reflectance_cube, site_lonlat, write_composite
 from services.training.dataset import LaunchSiteDataset
-from tests.fixtures.synthetic import make_reflectance_cube, site_lonlat, write_composite
 
 
 def test_dataset_and_inference_preprocessing_are_byte_equal(small_composite, tmp_path):

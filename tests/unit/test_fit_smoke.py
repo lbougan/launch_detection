@@ -7,8 +7,8 @@ import rasterio
 from libs.features.stats import compute_channel_stats, save_stats
 from libs.geo.chips import chip_raster
 from libs.geo.labels import build_label_mask, write_label
+from libs.synthetic import site_lonlat
 from services.training.fit import FitConfig, fit_with_trainer
-from tests.fixtures.synthetic import site_lonlat
 
 
 def test_fit_runs_one_epoch_on_cpu_and_logs_site_recall(small_composite, tmp_path):

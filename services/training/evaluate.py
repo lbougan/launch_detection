@@ -118,7 +118,11 @@ def build_parser():
 
     ap = argparse.ArgumentParser(description="Evaluate a checkpoint on held-out sites")
     ap.add_argument("--checkpoint", required=True)
-    ap.add_argument("--manifest", default="data/manifests/chip_manifest.json")
+    ap.add_argument(
+        "--aoi-config",
+        default="data/manifests/aoi_config.json",
+        help="AOIs; a split is evaluated on the composites of the AOIs it holds out",
+    )
     ap.add_argument(
         "--stats",
         default=None,
@@ -140,6 +144,7 @@ def main() -> None:
     from libs.config import default_stats_path
     from libs.features.stats import resolve_stats
     from libs.geo.chips import load_known_sites
+    from libs.geo.splits import aoi_split
     from libs.inference.predictors import LocalTorchPredictor
 
     args = build_parser().parse_args()
@@ -147,7 +152,7 @@ def main() -> None:
 
     sites = load_known_sites(Path(args.sites))
     splits = json.loads(Path(args.splits).read_text())
-    manifest = json.loads(Path(args.manifest).read_text())
+    aoi_config = json.loads(Path(args.aoi_config).read_text())
     predictor = LocalTorchPredictor.from_checkpoint(args.checkpoint, device=args.device)
     embedded = getattr(predictor, "stats", None)
     if embedded is None and args.stats is None:
@@ -157,7 +162,9 @@ def main() -> None:
     for split in args.split or ["val", "test"]:
         names = set(splits[split])
         split_sites = [s for s in sites if s["name"] in names]
-        aois = sorted({c["aoi"] for c in manifest if c.get("split") == split})
+        # By AOI, as the training monitor does: a training AOI with a few chips inside the
+        # exclusion radius of a held-out site must not be scored as held out.
+        aois = sorted(a["name"] for a in aoi_config["aois"] if aoi_split(a, sites, splits) == split)
         comps = [Path(args.composites_dir) / f"{a}_composite.tif" for a in aois]
         results.append(
             evaluate_composites(

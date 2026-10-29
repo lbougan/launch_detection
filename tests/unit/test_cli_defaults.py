@@ -1,4 +1,4 @@
-"""CLI defaults: one stats path everywhere, ingest scene limit and precision pass-through."""
+"""CLI defaults: one stats path for training, the checkpoint's own after that, ingest scene limit and precision pass-through."""
 
 from __future__ import annotations
 
@@ -17,11 +17,18 @@ def test_all_stats_defaults_equal_default_stats_path():
     expected = str(default_stats_path())
     stats_opt = next(p for p in train.params if p.name == "stats")
     assert stats_opt.default == expected
-    # evaluate: None = the checkpoint's embedded stats (default_stats_path for old checkpoints)
+    # Consumers of a checkpoint default to its embedded stats (default_stats_path for
+    # checkpoints from before stats were embedded) and check a given file against them.
     assert evaluate_parser().parse_args(["--checkpoint", "c"]).stats is None
-    assert export_parser().parse_args(["--checkpoint", "c"]).stats == expected
+    assert export_parser().parse_args(["--checkpoint", "c"]).stats is None
     assert flows.build_parser().parse_args(["train"]).stats == expected
-    assert flows.build_parser().parse_args(["detect"]).stats == expected
+    assert flows.build_parser().parse_args(["detect"]).stats == ""
+
+
+def test_detect_stats_path_defaults_to_the_file_only_for_triton():
+    assert flows.detect_stats_path("local", "") == ""
+    assert flows.detect_stats_path("triton", "") == str(default_stats_path())
+    assert flows.detect_stats_path("triton", "x.json") == "x.json"
 
 
 def test_ingest_max_scenes_is_passed_through_to_the_flow():
